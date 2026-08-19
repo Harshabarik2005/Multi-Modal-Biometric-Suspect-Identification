@@ -1,0 +1,21 @@
+[project]
+name = "faceless-frs-backend"
+version = "0.1.0"
+description = "Multi-modal biometric suspect identification (face + gait + re-ID fusion)"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+# Makes `import app.…` work in tests without installing the package.
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+    "slow: needs model weights and/or a real video; skipped unless --run-slow",
+]
+
+[tool.ruff]
+line-length = 90
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

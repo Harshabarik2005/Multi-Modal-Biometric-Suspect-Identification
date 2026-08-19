@@ -1,0 +1,59 @@
+# --- Python -----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# --- Testing / tooling ------------------------------------------------------
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# --- Secrets ----------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# --- Model weights (re-downloadable; keep them out of git) ------------------
+data/models/
+*.pt
+*.pth
+*.onnx
+*.engine
+
+# --- Biometric data ---------------------------------------------------------
+# Enrollment footage, embeddings and CCTV clips are personal data. They must
+# never be committed -- see section 8 of the build plan.
+data/enrollment/*
+!data/enrollment/.gitkeep
+data/test_videos/*
+!data/test_videos/.gitkeep
+data/output/
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.npy
+*.npz
+
+# --- Frontend ---------------------------------------------------------------
+node_modules/
+frontend/dist/
+frontend/build/
+frontend/.vite/
+
+# --- Editors / OS -----------------------------------------------------------
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

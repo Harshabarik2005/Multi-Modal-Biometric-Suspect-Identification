@@ -1,0 +1,96 @@
+# Phase notes
+
+Running log of what each phase actually delivered and what the next one needs.
+Build-plan phase list lives in
+[faceless-frs-build-plan.md](../faceless-frs-build-plan.md) section 6.
+
+---
+
+## Phase 0 — scaffold, env, config ✅
+
+- Repo laid out per section 5 of the build plan.
+- `backend/requirements.txt` — Phase 1 deps active, later phases listed but
+  commented so the first install stays small.
+- Config is layered: `backend/config.yaml` → env vars (`FRS_` prefix, `__`
+  nesting) → CLI flags, highest wins. Loader in `backend/app/core/config.py`.
+- `.gitignore` excludes `data/` wholesale. Enrollment footage and biometric
+  templates are personal data and must not enter git history.
+- Phase 2+ modules exist as documented stubs that raise `NotImplementedError`.
+  Structure without pretend implementations.
+
+## Phase 1 — detection + tracking ✅
+
+**Delivered:** YOLOv8 person detection + DeepSORT tracking over a video source,
+printing per-track frame counts.
+
+Key files:
+
+| File | Role |
+|---|---|
+| `app/core/types.py` | `Detection`, `Track`, `FrameResult` — the contract between stages |
+| `app/core/video.py` | `VideoReader` — files, streams, camera indices; stride + frame cap |
+| `app/detection/yolo_detector.py` | Ultralytics wrapper → `Detection` list |
+| `app/tracking/deepsort_tracker.py` | `deep-sort-realtime` wrapper → `Track` list |
+| `app/pipeline.py` | `DetectionTrackingPipeline` — the spine later phases plug into |
+| `scripts/run_pipeline.py` | CLI |
+| `scripts/make_test_video.py` | Smoke-test clip generator |
+
+### Decisions worth remembering
+
+**Boxes are `xyxy` in absolute source-frame pixels, everywhere.** DeepSORT
+wants `ltwh`, so `Detection.ltwh` converts at the boundary. Every later branch
+should take crops via `Track.crop(frame)` and never re-derive coordinates.
+
+**Only confirmed tracks leave the tracker.** A detection must survive
+`tracking.n_init` (default 3) consecutive frames before it gets an ID. This
+keeps single-frame false positives out of the matching stage entirely — which
+matters more here than in generic tracking, because a spurious track becomes a
+spurious identification attempt against the watchlist.
+
+**`min_box_height` (default 60px) drops tiny detections.** A 20-pixel-tall
+person yields a useless face crop and a meaningless gait silhouette. Filtering
+at the detector is cheaper than discovering it three branches later.
+
+**DeepSORT's appearance embedder is for association only.** It is *not* the
+re-ID embedding used for matching — that is OSNet, in Phase 4. Two different
+jobs that both happen to be called "re-ID"; don't conflate them.
+
+**`VideoReader` reports true source frame indices, not emitted counts.** With
+`frame_stride=5` the second emitted frame is index 5, timestamp `5/fps`. Gait
+cycle detection in Phase 3 depends on real timing, so this has to stay correct.
+
+### Known limits at this phase
+
+- Tracks break under long occlusion. Expected; multi-modal re-identification is
+  precisely what fixes this, from Phase 4 on.
+- `detect_batch` exists and truly batches, but `pipeline.stream` still calls
+  `detect` per frame — batching needs a frame buffer, which is worth adding when
+  throughput becomes the bottleneck, not before.
+- The synthetic pan clip is a smoke test, not a benchmark. It proves wiring, not
+  accuracy.
+
+---
+
+## Phase 2 — face branch (next)
+
+Goal: enroll one person, match them in a test video by cosine similarity. One
+modality working end to end before adding the others.
+
+Rough shape:
+
+1. `pip install insightface onnxruntime-gpu` (uncomment in `requirements.txt`).
+2. Implement `app/embeddings/face.py`: track crop → face detect/align → ArcFace
+   → L2-normalised 512-d embedding, plus a per-frame quality score. That score
+   is not optional garnish — Phase 6's attention head consumes it.
+3. Enrollment script: 360° rotation video → pose-guided face crops → averaged
+   reference embedding, written to `data/enrollment/<person_id>/`.
+4. Matching script: run the Phase-1 pipeline, embed each track's face crops,
+   compare against the reference by cosine similarity.
+5. Sanity threshold: ArcFace cosine similarity above ~0.4 is a plausible
+   starting point for same-person, but calibrate it on your own footage rather
+   than trusting the number — Phase 10's TAR@FAR curve is what actually sets it.
+
+Watch out for: no face visible in a crop (back turned) is the *normal* case
+here, not an error path. The branch must return "no signal" cleanly and let
+fusion lean on gait and re-ID instead. That is the entire premise of the
+project.

@@ -1,0 +1,62 @@
+# ---------------------------------------------------------------------------
+# Faceless FRS - default configuration
+#
+# Every value here can be overridden by an environment variable using the
+# prefix FRS_ and __ as the nesting separator, e.g.
+#   FRS_DETECTION__CONF_THRESHOLD=0.5
+#   FRS_DEVICE=cpu
+# Env vars win over this file. See backend/app/core/config.py.
+# ---------------------------------------------------------------------------
+
+project_name: "Faceless FRS"
+
+# "cuda", "cpu", or "auto" (picks cuda when available)
+device: auto
+
+paths:
+  data_dir: data
+  models_dir: data/models
+  enrollment_dir: data/enrollment
+  test_videos_dir: data/test_videos
+  output_dir: data/output
+
+detection:
+  # Ultralytics model name or path. yolov8n = nano, fastest; step up to
+  # yolov8s/m if recall on small/distant people is poor.
+  model: yolov8n.pt
+  conf_threshold: 0.35      # min detection confidence to keep a box
+  iou_threshold: 0.5        # NMS IoU
+  # COCO class 0 is "person" - the only class this system cares about.
+  person_class_id: 0
+  imgsz: 640
+  # Drop boxes smaller than this many pixels tall; tiny boxes yield useless
+  # face/gait/re-ID crops later and just create junk tracks.
+  min_box_height: 60
+  half: true                # fp16 inference on CUDA (ignored on CPU)
+
+tracking:
+  # Frames a track survives without a matching detection before deletion.
+  max_age: 30
+  # Consecutive detections required before a tentative track is confirmed.
+  n_init: 3
+  # Max cosine distance for appearance-embedding association.
+  max_cosine_distance: 0.35
+  nn_budget: 100
+  # DeepSORT's own lightweight appearance embedder. This is for association
+  # only - it is NOT the re-ID embedding used for matching (Phase 4 / OSNet).
+  embedder: mobilenet
+  embedder_gpu: true
+
+video:
+  # Process every Nth frame. 1 = every frame. Raising this speeds up long
+  # videos at the cost of tracking continuity.
+  frame_stride: 1
+  # Cap frames processed per run; null = whole video.
+  max_frames: null
+  # Write an annotated video with boxes + track IDs to paths.output_dir.
+  save_annotated: false
+
+logging:
+  level: INFO
+  # Log a progress line every N processed frames.
+  progress_every: 30
