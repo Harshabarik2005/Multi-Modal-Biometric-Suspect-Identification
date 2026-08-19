@@ -59,6 +59,31 @@ jobs that both happen to be called "re-ID"; don't conflate them.
 `frame_stride=5` the second emitted frame is index 5, timestamp `5/fps`. Gait
 cycle detection in Phase 3 depends on real timing, so this has to stay correct.
 
+### Dependency traps hit while getting this running
+
+**`setuptools<81` is a hard pin, not tidiness.** `deep-sort-realtime` 1.3.2
+still imports `pkg_resources`, which setuptools removed in 81. On a fresh
+install (pip pulls the newest setuptools) the tracker dies at import with
+`ModuleNotFoundError: No module named 'pkg_resources'`. The pin is in
+`requirements.txt` with that explanation. Drop it once upstream moves to
+`importlib.metadata`.
+
+**Ultralytics 8.4 renamed `half=True` to `quantize=16`.** The old name still
+works but warns *once per inference call* — 120 frames, 120 warnings.
+`YOLOPersonDetector._resolve_precision_kwargs` asks the installed build which
+argument it knows, rather than pinning a version, since `requirements.txt`
+allows both 8.3 and 8.4.
+
+**Weights download to the working directory by default.** Ultralytics resolves
+a bare name like `yolov8n.pt` by fetching it into the cwd, so it lands wherever
+the CLI was run from. `_resolve_weights` pre-fetches into `paths.models_dir`
+instead, falling back to Ultralytics' own resolution for custom checkpoint
+names it does not recognise.
+
+**On Windows, `torch` from PyPI is CPU-only.** Install from the CUDA index
+first, then `requirements.txt`. Verified working: torch 2.5.1+cu121 on an
+RTX 3050.
+
 ### Known limits at this phase
 
 - Tracks break under long occlusion. Expected; multi-modal re-identification is
@@ -67,7 +92,16 @@ cycle detection in Phase 3 depends on real timing, so this has to stay correct.
   `detect` per frame — batching needs a frame buffer, which is worth adding when
   throughput becomes the bottleneck, not before.
 - The synthetic pan clip is a smoke test, not a benchmark. It proves wiring, not
-  accuracy.
+  accuracy. It tiles one photo, so the "people" in it are duplicates and mirror
+  images of the same few pedestrians -- fine for confirming detection and
+  tracking run, useless for judging identification. Do not read anything into
+  match numbers produced against it.
+
+### Verified on this machine
+
+120 frames of the synthetic clip, RTX 3050, fp16, `yolov8n.pt`: 686 person
+detections, 11 confirmed tracks, the longest running 118 of 120 frames. Full
+suite 27 passed (26 fast + 1 end-to-end under `--run-slow`).
 
 ---
 

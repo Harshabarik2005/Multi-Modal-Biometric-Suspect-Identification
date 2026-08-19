@@ -2,9 +2,9 @@
 
 Phase 1 needs *some* footage with people in it before real CCTV clips exist.
 This builds one from `bus.jpg`, the sample image that ships with Ultralytics
-(it contains several pedestrians), by panning and zooming a crop window across
-it. People therefore move between frames, which is exactly what the tracker
-needs in order to form tracks.
+(it contains several pedestrians): the image is tiled into a wide canvas and a
+frame-sized window pans across it. People therefore move between frames, which
+is exactly what the tracker needs in order to form tracks.
 
 This is a smoke-test fixture, not a benchmark. Replace it with real enrollment
 and CCTV footage in `data/test_videos/` as soon as you have any.
@@ -54,19 +54,39 @@ def load_source_image() -> np.ndarray:
     return image
 
 
+def build_canvas(image: np.ndarray, out_h: int) -> np.ndarray:
+    """Build a wide canvas by tiling the source image horizontally.
+
+    bus.jpg is portrait and the output frame is landscape, so any crop window
+    wide enough to fill the frame shows only a horizontal band -- people get
+    cut off at the knees. Later phases need whole bodies (gait needs a full
+    silhouette, re-ID a full body crop), so instead of cropping into the image
+    we scale it to fit the frame height and repeat it sideways, alternating
+    mirrored copies so the seams are less abrupt. Panning across that gives
+    full-height people who enter and leave the frame.
+    """
+    src_h, src_w = image.shape[:2]
+    # Slightly taller than the frame, leaving a little vertical room to pan.
+    scale = (out_h * 1.12) / src_h
+    tile = cv2.resize(
+        image, (int(src_w * scale), int(src_h * scale)), interpolation=cv2.INTER_CUBIC
+    )
+    mirrored = cv2.flip(tile, 1)
+    return np.hstack([tile, mirrored, tile, mirrored])
+
+
 def build_video(
     image: np.ndarray, out_path: Path, frames: int, fps: int, size: tuple[int, int]
 ) -> None:
-    """Pan/zoom a crop window over `image` and write it out as a video."""
+    """Pan a crop window across the tiled canvas and write it out as a video."""
     out_w, out_h = size
-    src_h, src_w = image.shape[:2]
+    canvas = build_canvas(image, out_h)
+    canvas_h, canvas_w = canvas.shape[:2]
 
-    # Upscale so the crop window has room to travel without leaving the image.
-    scale = max(2.0, (out_w * 1.6) / src_w, (out_h * 1.6) / src_h)
-    big = cv2.resize(
-        image, (int(src_w * scale), int(src_h * scale)), interpolation=cv2.INTER_CUBIC
-    )
-    big_h, big_w = big.shape[:2]
+    if canvas_w < out_w:
+        raise RuntimeError(
+            f"Canvas ({canvas_w}px) is narrower than the requested frame ({out_w}px)."
+        )
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     writer = cv2.VideoWriter(
@@ -75,23 +95,18 @@ def build_video(
     if not writer.isOpened():
         raise RuntimeError(f"Could not open video writer for {out_path}")
 
+    max_x = canvas_w - out_w
+    max_y = max(0, canvas_h - out_h)
+
     try:
         for i in range(frames):
             t = i / max(1, frames - 1)
-
-            # Crop window shrinks slightly over the clip (slow zoom in) and
-            # slides horizontally with a gentle vertical bob.
-            zoom = 1.0 - 0.25 * t
-            crop_w = min(big_w, int(out_w * 1.5 * zoom))
-            crop_h = min(big_h, int(out_h * 1.5 * zoom))
-
-            max_x = max(0, big_w - crop_w)
-            max_y = max(0, big_h - crop_h)
+            # Steady horizontal pan, with a gentle vertical drift so the
+            # tracker sees motion on both axes.
             x = int(max_x * t)
             y = int(max_y * (0.5 + 0.5 * math.sin(2 * math.pi * t)))
-
-            window = big[y : y + crop_h, x : x + crop_w]
-            writer.write(cv2.resize(window, (out_w, out_h), interpolation=cv2.INTER_AREA))
+            window = canvas[y : y + out_h, x : x + out_w]
+            writer.write(window)
     finally:
         writer.release()
 

@@ -56,6 +56,39 @@ class TestAnnotate:
         result = FrameResult(frame_index=0, timestamp_s=0.0)
         assert _annotate(blank_frame, result).shape == blank_frame.shape
 
+    def test_label_stays_on_canvas_for_a_track_at_the_top_edge(
+        self, blank_frame
+    ) -> None:
+        """A person entering at the top of frame must still show their ID.
+
+        The label normally sits above the box; at y1=0 there is no room, so it
+        has to flip inside the box. Drawn off-canvas, OpenCV clips it silently
+        and the track renders with no visible ID at all.
+        """
+        result = FrameResult(
+            frame_index=0,
+            timestamp_s=0.0,
+            tracks=[Track(track_id=4, x1=100, y1=0, x2=200, y2=300)],
+        )
+        canvas = _annotate(blank_frame, result)
+
+        # The label band must be painted inside the box, just below its top.
+        band = canvas[0:30, 100:200]
+        assert (band != 128).any(), "label band was clipped off-canvas"
+
+    def test_label_stays_on_canvas_for_a_track_at_the_right_edge(
+        self, blank_frame
+    ) -> None:
+        width = blank_frame.shape[1]
+        result = FrameResult(
+            frame_index=0,
+            timestamp_s=0.0,
+            tracks=[Track(track_id=5, x1=width - 10, y1=100, x2=width, y2=300)],
+        )
+        # Must not raise, and must draw something visible near the edge.
+        canvas = _annotate(blank_frame, result)
+        assert (canvas[80:100, width - 80 : width] != 128).any()
+
 
 @pytest.mark.slow
 class TestEndToEnd:

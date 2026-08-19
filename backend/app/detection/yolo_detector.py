@@ -45,20 +45,57 @@ class YOLOPersonDetector:
 
         self.model = YOLO(str(weights))
         self.model.to(self.device)
+        self._precision_kwargs = self._resolve_precision_kwargs()
+
+    def _resolve_precision_kwargs(self) -> dict[str, object]:
+        """Pick the fp16 argument this Ultralytics version actually accepts.
+
+        8.4 replaced `half=True` with `quantize=16` and warns once per call on
+        the old name. requirements.txt allows both 8.3 and 8.4, so ask the
+        installed build which one it knows rather than pinning a version.
+        """
+        if not self.half:
+            return {}
+        try:
+            from ultralytics.cfg import DEFAULT_CFG_DICT
+
+            if "quantize" in DEFAULT_CFG_DICT:
+                return {"quantize": 16}
+        except ImportError:
+            pass
+        return {"half": True}
 
     def _resolve_weights(self, model: str) -> Path | str:
-        """Prefer a local copy in models_dir; otherwise let Ultralytics fetch it."""
+        """Return a local weights path, downloading into models_dir if needed.
+
+        Left to itself, Ultralytics drops a bare name like "yolov8n.pt" into
+        the current working directory, so the file lands wherever the CLI
+        happened to be run from. Fetching it explicitly keeps every weight
+        under the configured models_dir.
+        """
         candidate = Path(model)
         if candidate.is_file():
             return candidate
 
-        local = self.settings.paths.models_dir / candidate.name
+        models_dir = self.settings.paths.models_dir
+        local = models_dir / candidate.name
         if local.is_file():
             return local
 
-        # Ultralytics resolves a bare name like "yolov8n.pt" by downloading it.
-        self.settings.paths.models_dir.mkdir(parents=True, exist_ok=True)
-        return model
+        models_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            from ultralytics.utils.downloads import attempt_download_asset
+
+            logger.info("Downloading %s into %s", candidate.name, models_dir)
+            return Path(attempt_download_asset(local))
+        except Exception as exc:  # noqa: BLE001 - fall back rather than fail hard
+            # Not a known release asset (a custom checkpoint name), or the
+            # download failed. Hand the bare name to Ultralytics and let it try.
+            logger.warning(
+                "Could not pre-fetch %s into %s (%s); letting Ultralytics resolve it",
+                candidate.name, models_dir, exc,
+            )
+            return model
 
     def _predict(self, source):
         return self.model.predict(
@@ -68,8 +105,8 @@ class YOLOPersonDetector:
             classes=[self.cfg.person_class_id],
             imgsz=self.cfg.imgsz,
             device=self.device,
-            half=self.half,
             verbose=False,
+            **self._precision_kwargs,
         )
 
     def _parse(self, result) -> list[Detection]:

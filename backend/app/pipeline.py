@@ -104,13 +104,27 @@ def _annotate(frame: np.ndarray, result: FrameResult) -> np.ndarray:
         (text_w, text_h), _ = cv2.getTextSize(
             label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2
         )
+        # Labels sit above the box, but a person entering at the top of the
+        # frame has no room there -- flip inside the box rather than drawing
+        # off-canvas, where OpenCV would silently clip the ID away.
+        band_h = text_h + 8
+        if y1 - band_h >= 0:
+            band_top, text_baseline = y1 - band_h, y1 - 5
+        else:
+            band_top, text_baseline = y1, y1 + text_h + 3
+        band_left = max(0, min(x1, canvas.shape[1] - text_w - 6))
+
         cv2.rectangle(
-            canvas, (x1, y1 - text_h - 8), (x1 + text_w + 6, y1), color, -1
+            canvas,
+            (band_left, band_top),
+            (band_left + text_w + 6, band_top + band_h),
+            color,
+            -1,
         )
         cv2.putText(
             canvas,
             label,
-            (x1 + 3, y1 - 5),
+            (band_left + 3, text_baseline),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.6,
             (0, 0, 0),
