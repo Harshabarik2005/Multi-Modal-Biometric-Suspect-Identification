@@ -643,17 +643,98 @@ is exactly what a synthetic-trained head hits against real 512-d embeddings.
 
 ---
 
-## Phase 7 — backend API and database (next)
+## Phase 7 — backend API and database ✅
 
-FastAPI routes plus persistence. The gallery interface was kept deliberately
-narrow in Phase 2 so this swap stays cheap: `GalleryStore` is the only thing
-that touches disk.
+**Delivered:** SQLAlchemy schema, a database-backed watchlist, FastAPI routes,
+and the human-confirm workflow made structural rather than conventional.
 
-What the schema has to carry, from section 8 rather than convenience:
-biometric templates encrypted at rest (already implemented in `GalleryStore`,
-needs porting), and an append-only audit record for every match decision
-including its per-modality weights and the confirming operator.
+| File | Role |
+|---|---|
+| `app/db/models.py` | Person, Template, MatchDecision, DecisionReview, AuditEvent |
+| `app/db/repository.py` | `WatchlistRepository` — the only code that writes |
+| `app/api/routes.py` | watchlist CRUD, decisions, alerts, audit |
+| `app/api/main.py` | app factory |
+| `scripts/serve.py` | run the API; import phase-2 file enrollments |
 
-The match endpoint should return the fusion breakdown, not just a score. The
-Phase-8 dashboard needs it, and a reviewer confirming a match needs to see
-whether it rested on a clear face or mostly on a jacket.
+### The guardrails are in the schema, not in a convention
+
+**Nothing can confirm a match except a human.** `record_match` only ever writes
+`status = PENDING`. The single path to CONFIRMED is `review()`, which requires
+a non-blank operator name and accepts only CONFIRMED or REJECTED — the system
+cannot mark its own decision resolved. `/alerts` returns confirmed decisions
+only, so Phase 9's alerting physically cannot see an unreviewed match.
+
+**The audit trail cannot be rewritten.** A review appends a `DecisionReview`
+row; it never edits the decision. A reviewer changing their mind leaves both
+judgements visible, because "the system said X and someone changed it to Y" is
+exactly what a review needs to be able to see.
+
+**Retiring is not deleting.** Match decisions reference the person, so removing
+the row would make past decisions unreviewable. `retired_at` is set instead,
+and retired people drop out of the gallery.
+
+**Templates never cross the wire.** Enrollment takes video; the API describes
+templates (modality, dim, quality, encrypted) but never returns a vector. An
+API that hands out biometric vectors is a biometric-vector leak with extra
+steps. Encryption reuses `GalleryStore`'s Fernet path so there is one
+implementation rather than two that can drift.
+
+### Two bugs found by the tests
+
+**In-memory SQLite gave every connection its own empty database.** `create_schema`
+built the tables on one connection, and the next session opened a blank one and
+reported "no such table". Ten tests failed on it. `StaticPool` pins a single
+connection for `:memory:` URLs.
+
+**Re-enrollment hit a unique constraint.** Deleting the old templates and
+inserting new ones in the same flush let SQLAlchemy order the INSERTs first,
+tripping `(person, modality)`. Needed an explicit `flush()` between.
+
+### The `.gitignore` gap
+
+The database file was **not** ignored. It holds biometric templates and the
+whole match audit trail, so a single `git add -A` would have committed the
+watchlist. `*.db`, `*.sqlite`, and the SQLite journal/WAL sidecars are now
+excluded. Nothing sensitive had been committed — checked — but the gap was
+real and the earlier `data/` rules did not cover it.
+
+### Verified on this machine
+
+End-to-end through the API: imported the phase-2 file enrollment, recorded a
+match with its fusion weights, confirmed `/alerts` was **empty** while the
+decision was pending, reviewed it as a named operator, and watched it become
+actionable and appear in `/alerts` — with the audit trail showing both the
+enrolment and the review with their actors.
+
+Full suite: **206 passed**.
+
+### Known limits at this phase
+
+- **No authentication.** `operator` is a free-text field, so the audit trail
+  records a claimed name rather than a verified identity. That is honest for a
+  local build but is not an access-control story; real deployment needs auth
+  before the operator field means anything.
+- **No enrollment-by-upload endpoint.** Enrolment still runs through
+  `scripts/enroll.py` and is imported with `serve.py --import-enrollments`.
+  Video upload plus background processing is a larger piece of work.
+- **No live matching endpoint.** `scripts/match.py` writes to the console, not
+  the database. Wiring the matcher to `record_match` is what makes the
+  dashboard live, and it is the natural first task of Phase 8.
+- SQLite by default. The schema is Postgres-compatible and `--db-url` takes any
+  SQLAlchemy URL, but no migrations exist yet — `create_all` only.
+
+---
+
+## Phase 8 — frontend dashboard (next)
+
+React: enrollment flow, live monitoring, alerts, and the explainability view.
+
+The API already returns what the explainability view needs — every decision
+carries `weights` and `calibrated` per modality, plus its strategy. The screen
+that matters most is the review queue: it has to show a reviewer *why* a match
+fired before they confirm it, because a match driven by a jacket and one driven
+by a clear face deserve very different levels of confidence, and the numbers to
+tell them apart are already in the payload.
+
+Before the dashboard can show anything live, `scripts/match.py` needs to write
+its candidates to the database via `record_match` rather than printing them.

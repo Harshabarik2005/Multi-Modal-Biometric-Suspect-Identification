@@ -33,6 +33,16 @@ data/models/
 # --- Biometric data ---------------------------------------------------------
 # Enrollment footage, embeddings and CCTV clips are personal data. They must
 # never be committed -- see section 8 of the build plan.
+#
+# The database counts: it holds biometric templates and the full match audit
+# trail. Encrypted at rest when a key is configured, but a committed database
+# is still a committed watchlist.
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm
 data/enrollment/*
 !data/enrollment/.gitkeep
 data/test_videos/*

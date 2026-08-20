@@ -14,11 +14,11 @@ Identification"* (2023, [arXiv:2303.13814](https://arxiv.org/abs/2303.13814)).
 The full spec, including where this project deliberately diverges from the
 paper, is in [faceless-frs-build-plan.md](faceless-frs-build-plan.md).
 
-> **Status: Phases 1–5 complete; phase 6 built but not deployable.** All
-> three modalities work end to end and matching fuses them with calibrated
-> scores. The keyless attention head (phase 6) is implemented and trains,
-> but only on synthetic data — it refuses to run untrained, and training it
-> for real needs footage that does not exist yet.
+> **Status: Phases 1–5 and 7 complete; phase 6 built but not deployable.**
+> All three modalities work end to end, matching fuses them with calibrated
+> scores, and there is a FastAPI backend with an audited, human-confirmed
+> decision workflow. The keyless attention head (phase 6) is implemented and
+> trains, but only on synthetic data — it refuses to run untrained.
 
 ## Responsible use
 
@@ -210,8 +210,8 @@ backend/
     matching/      watchlist gallery + open-set ranking  [Phase 2 ✓]
     fusion/        calibration.py, baseline.py [Phase 5 ✓]
                    attention.py, training.py   [Phase 6, untrained]
-    api/           FastAPI routes                        [Phase 7]
-    db/            models + migrations                   [Phase 7]
+    api/           FastAPI routes + app factory          [Phase 7 ✓]
+    db/            models + repository                    [Phase 7 ✓]
     alerts/        Twilio / SMTP                         [Phase 9]
     pipeline.py    detection + tracking spine            [Phase 1 ✓]
   scripts/         CLI entry points
@@ -225,7 +225,7 @@ data/
 docs/
 ```
 
-Modules for phases 7+ exist as documented placeholders that raise
+Modules for phases 8+ exist as documented placeholders that raise
 `NotImplementedError` — the layout is in place, the code is not.
 
 ## The attention head (Phase 6)
@@ -247,9 +247,39 @@ Phase-5 rules. Training it properly needs labelled same/different pairs — the
 same person recorded twice plus other people — which is where real footage
 stops being optional.
 
-## Next: Phase 7
+## The API (Phase 7)
 
-Backend API and database. See [docs/phase-notes.md](docs/phase-notes.md).
+```bash
+cd backend && python scripts/serve.py
+```
+
+Interactive docs at `http://127.0.0.1:8000/docs`. To move enrollments created
+by `scripts/enroll.py` into the database:
+
+```bash
+cd backend && python scripts/serve.py --import-enrollments
+```
+
+The workflow enforces the build plan's guardrails structurally rather than by
+convention:
+
+| Guardrail | How it is enforced |
+|---|---|
+| No action on a match alone | Matches are always created `pending`; the only route to `confirmed` is `POST /decisions/{id}/review` with a named operator |
+| Alerting sees confirmed only | `/alerts` returns confirmed decisions; a pending one is invisible to it |
+| Audit trail is append-only | A review adds a row; it never edits the decision, so a change of mind leaves both judgements visible |
+| Templates stay private | The API describes templates but never returns a vector |
+| Removal preserves history | `DELETE /watchlist/{id}` retires rather than deletes, so past decisions stay reviewable |
+
+**Set `FRS_TEMPLATE_ENCRYPTION_KEY` before enrolling anyone through the API**,
+or templates are written unencrypted and every write logs a warning saying so.
+The database file is git-ignored — it holds biometric templates and the whole
+audit trail.
+
+## Next: Phase 8
+
+React dashboard: enrollment flow, live monitoring, alerts, and the
+explainability view. See [docs/phase-notes.md](docs/phase-notes.md).
 
 Two standing caveats on modality strength. Gait uses a **classical GEI
 descriptor, not a learned embedding**, because OpenGait ships no licence file
