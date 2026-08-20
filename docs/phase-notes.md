@@ -808,13 +808,205 @@ Production build: 153 kB JS (49 kB gzipped). Full suite: **192 passed**.
 
 ---
 
-## Phase 9 — alerting (next)
+## Phase 9 — alerting ✅
 
-Twilio / SMTP, gated on `/alerts` — confirmed decisions only. The gate already
-exists and is tested, so the work is the notification transport plus a record
-of what was sent to whom, which belongs in the audit trail alongside everything
-else.
+**Delivered:** SMTP and Twilio transports, gated on human-confirmed decisions.
 
-The one thing to get right: an alert must carry the same explainability the
-dashboard shows. A notification that says only "match found, 0.91" invites
-exactly the unexamined trust the review step exists to prevent.
+| File | Role |
+|---|---|
+| `app/alerts/notifier.py` | transports, rendering, `AlertDispatcher` |
+| `scripts/send_alerts.py` | dispatch CLI, dry-run by default |
+
+### The gate is checked twice
+
+`AlertDispatcher` selects only confirmed decisions *and* re-checks each one
+immediately before sending. Belt and braces, because this is the single place
+in the system where a mistake leaves the building: everything else can be
+corrected in the review console, but an alert cannot be unsent.
+
+Tested directly: pending never alerts, rejected never alerts, and a
+confirmation later reversed by a second reviewer stops alerting.
+
+### Other decisions
+
+**Alerts carry the reasoning.** A notification saying "match found, 0.91"
+invites exactly the unexamined trust the review step exists to prevent, so
+every alert lists which modalities drove the score, names the operator who
+confirmed it, and warns when it rested mostly on clothing.
+
+**Nothing is sent twice.** Delivery writes an audit event; a re-run skips
+anything already alerted. A duplicate alert reads as a second sighting.
+
+**A failed delivery is not marked sent**, so a transient outage does not
+silently swallow an alert — the next run retries it.
+
+**Dry run is the default**, and `--send` is required on top of configuration.
+Accidentally messaging a real contact list during testing is not recoverable.
+
+---
+
+## Phase 10 — evaluation harness ✅
+
+**Delivered:** TAR@FAR, ROC-AUC, EER, CMC/Rank-N, the ablation table, and a
+demographic fairness breakdown.
+
+| File | Role |
+|---|---|
+| `eval/metrics.py` | the open-set metrics |
+| `eval/ablation.py` | Table I equivalent, with coverage handling |
+| `eval/run_evaluation.py` | CLI |
+
+### Why not accuracy
+
+In an open-set watchlist almost everyone passing a camera is on nobody's list,
+so a system that matched *nobody, ever* would score superbly on accuracy while
+being useless. The question is "at a false-alarm rate we can live with, what
+fraction of the people we are looking for do we find" — TAR@FAR.
+
+### The methodological bug the harness caught in itself
+
+The first ablation run looked damning: face-only scored **0.978 AUC** and
+fused scored **0.697**. Read naively, fusion makes things worse.
+
+It does not. Face-only was scored on **6,903** pairs and fusion on **18,949**.
+A single-modality row can only score pairs where that modality is present on
+*both* sides, so "face only" was being graded on precisely the easy cases —
+the ones where a face was visible. The two numbers describe different
+populations and are not comparable.
+
+The harness now reports two tables:
+
+* **Native coverage** — each row on the pairs it can score, with a `cover`
+  column, plus an automatic warning when coverage differs enough that the AUCs
+  are not comparable.
+* **Common subset** — every row restricted to pairs where all three modalities
+  are present. The only apples-to-apples AUC comparison, and an
+  unrepresentatively easy population, since a hidden face is the norm.
+
+### What that reveals about fusion
+
+On the common subset, face alone still beats fusion (0.949 vs 0.811). Fusion
+does not make a clear face better. What it buys is **coverage**: it produces a
+usable score on **97%** of pairs against face's **33%**.
+
+In deployment the alternative to a fused score on a turned-away person is not a
+better score — it is *no score at all*. That is the entire premise of the
+project, and it is now a measured statement rather than an assertion. The CLI
+prints this comparison automatically.
+
+### Other decisions
+
+**Missing modalities are skipped, not zeroed**, in the single-modality rows.
+Scoring them zero would measure availability rather than discriminative power
+and make face — the strongest signal — look like the worst.
+
+**Calibration anchors are derived from the data being evaluated**, not taken
+from config. The configured anchors were measured on real footage; applying
+them to synthetic scores would measure the mismatch rather than the fusion.
+
+**Small samples are flagged.** With 18 genuine pairs, TAR resolves in steps of
+5.6% and differences between rows are noise. The CLI says so rather than
+printing four decimal places of nothing.
+
+**Fairness groups are supplied, never inferred.** This code does not attempt to
+derive demographic attributes from biometric data. Per-group TAR@FAR at a
+shared threshold is what makes a gap visible; an aggregate number hides it.
+
+---
+
+## Phase 11 — extensions ✅
+
+**Delivered:** disguise augmentation, the per-stage benchmark, and the
+observation cap that came out of it. Time-aware re-ID trust decay landed in
+Phase 4 (`trust_at`).
+
+| File | Role |
+|---|---|
+| `app/embeddings/disguise.py` | synthetic masks, sunglasses, hoods, blur |
+| `scripts/test_disguise.py` | measures the face branch under occlusion |
+| `scripts/benchmark.py` | per-stage timing |
+
+### The face branch is occlusion-aware, and now it is measured
+
+The build plan claimed an "occlusion-aware face branch" that had never been
+tested. Measured on the enrollment fixture (baseline quality 0.480):
+
+| disguise | face covered | similarity | quality |
+|---|---|---|---|
+| mask | 36% | 0.741 | 0.340 |
+| sunglasses | 16% | 0.797 | 0.430 |
+| hood | 47% | 0.831 | 0.450 |
+| **mask + sunglasses** | 52% | **0.254** | **0.233** |
+| blur | — | 0.764 | 0.425 |
+
+Similarity and quality fall **together**. No disguise produced the dangerous
+case — an embedding far from the reference while still reporting good quality —
+which is what fusion needs, since it weights by quality and would trust such an
+embedding.
+
+Note the practical reading: a masked face still matches at 0.741, comfortably
+over threshold. A face that is both masked and wearing sunglasses drops to
+0.254 and correctly does *not* match — which is exactly the situation where
+gait and re-ID have to carry the identification.
+
+**The first run of this test was broken and looked like a triumph.** It
+reported similarity 1.000 for a masked face — apparently perfect invariance. In
+fact the disguises are proportioned to a *face* and were being applied to a
+*body* crop, so the "mask" landed around the knees. `apply_to_region` now
+places them inside the detected face box.
+
+### The benchmark found the real bottleneck
+
+Per-stage timing over 40 frames on the RTX 3050:
+
+- **face embedding: 70% of total runtime, 5.3 s per track**
+- detection + tracking together: 15.3 fps, not the problem
+
+It was embedding all 64 buffered crops on CPU. `TrackBuffer.best()` had existed
+since Phase 2 and was never wired up. Capping the live path at the largest 16
+crops took total runtime from **60.4 s to 29.9 s**.
+
+**That cap immediately introduced a second bug**, which the benchmark also
+caught: gait dropped to 0.00 s — producing nothing at all. Two reasons, both
+instructive. `best()` sorts by box height, destroying the temporal order
+cadence detection depends on; and 16 is below `gait.min_frames` of 20, so gait
+could never fire. The cap now applies only to the per-frame branches (face,
+re-ID) while gait receives the full ordered sequence. That distinction is the
+Phase-2 per-frame-versus-sequence split showing up again, this time as a
+performance bug.
+
+### Edge deployment
+
+Documented rather than implemented: TensorRT export needs the target device to
+build an engine, so it cannot be done meaningfully from a desktop. The
+benchmark's module docstring lists the levers in the order worth trying —
+raise `frame_stride`, raise `rematch_every`, drop to smaller backbones, and cut
+gait first since it costs a second segmentation pass and is the weakest signal.
+
+---
+
+## Where the project stands
+
+Every phase in the build plan is implemented. **273 tests pass.**
+
+The one thing that is not done, and cannot be done here, is validation on real
+footage. It blocks the same three things throughout:
+
+1. **Gait has no positive validation.** The negative direction is tested on
+   real video; the positive rests entirely on synthetic silhouettes.
+2. **The attention head cannot be honestly trained**, so Phase 6 refuses to
+   run. It learns the right weighting on synthetic data and that is all that
+   can be said.
+3. **The central claim is unproven.** Whether attention fusion beats
+   `quality_weighted` has never been tested on real data. The ablation harness
+   that would settle it is built, tested, and waiting for input.
+
+Every threshold in the system is a placeholder measured on one or two clips.
+`eval/run_evaluation.py` is what should set them, from a TAR@FAR curve on
+footage of real people.
+
+What real footage means concretely: several people, each recorded more than
+once, ideally at different times and from different cameras, with consent and a
+lawful basis. Run them through the pipeline, collect per-modality embeddings
+per sighting, and build `eval.ablation.Observation` records. Everything
+downstream of that point already works.

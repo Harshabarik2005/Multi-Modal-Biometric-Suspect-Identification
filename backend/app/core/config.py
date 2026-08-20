@@ -259,6 +259,45 @@ class MatchingSettings(BaseModel):
     min_track_observations: int = 5
     # Re-match a live track at most this often (in processed frames).
     rematch_every: int = 15
+    # Cap on how many of a track's buffered observations are embedded per
+    # match. Measured: embedding all 64 buffered crops made the face branch
+    # 70% of total runtime at 5.3s per track. Aggregation is quality-weighted,
+    # so the poorest crops barely move the result -- embedding the largest few
+    # gets nearly the same vector for a fraction of the cost. 0 means no cap.
+    max_observations_to_embed: int = 16
+
+
+class AlertSettings(BaseModel):
+    """Phase 9: notifications for confirmed identifications.
+
+    Sending is OFF by default and requires an explicit flag as well as
+    configuration. Accidentally messaging a real contact list during testing is
+    not recoverable, so the safe state is the default state.
+    """
+
+    # "console" (prints), "smtp", or "twilio".
+    transport: str = "console"
+
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_sender: str = ""
+    smtp_use_tls: bool = True
+    #: Comma-separated in config/env; parsed into a list at use.
+    smtp_recipients: str = ""
+
+    twilio_account_sid: str = ""
+    twilio_auth_token: str = ""
+    twilio_from_number: str = ""
+    twilio_to_numbers: str = ""
+
+    #: Included in SMS, which is too short to carry the full breakdown.
+    console_url: str = "http://localhost:5173"
+
+    @staticmethod
+    def split(value: str) -> list[str]:
+        return [item.strip() for item in value.split(",") if item.strip()]
 
 
 class VideoSettings(BaseModel):
@@ -291,6 +330,7 @@ class Settings(BaseSettings):
     gait: GaitSettings = GaitSettings()
     reid: ReIDSettings = ReIDSettings()
     fusion: FusionSettings = FusionSettings()
+    alerts: AlertSettings = AlertSettings()
     track_buffer: TrackBufferSettings = TrackBufferSettings()
     matching: MatchingSettings = MatchingSettings()
 

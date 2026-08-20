@@ -254,7 +254,20 @@ def run(args: argparse.Namespace) -> int:
                 continue
             buffer.last_matched_frame = result.frame_index
 
-            observations = list(buffer)
+            # Two different views of the same buffer, because the modalities
+            # are not the same shape in time.
+            #
+            # Face and re-ID are per-frame: order does not matter and a subset
+            # is fine, so they get the largest N crops. That alone cut face
+            # embedding from 5.3s to 2.1s per track.
+            #
+            # Gait is a SEQUENCE. `best()` sorts by box height, which destroys
+            # the temporal order cadence detection depends on, and N is below
+            # gait.min_frames anyway -- applying the cap to gait silently
+            # disabled it entirely.
+            cap = settings.matching.max_observations_to_embed
+            ordered = list(buffer)
+            sampled = buffer.best(cap) if cap else ordered
             verdict = verdicts.setdefault(track_id, TrackVerdict(track_id=track_id))
             verdict.observations = len(buffer)
 
@@ -263,15 +276,15 @@ def run(args: argparse.Namespace) -> int:
             # moderately agreeing is stronger evidence than either alone, and
             # a ladder cannot express that.
             probes = {}
-            probe_face = face_embedder.embed(observations)
+            probe_face = face_embedder.embed(sampled)
             if probe_face.has_signal:
                 probes[Modality.FACE] = probe_face
             if gait_embedder is not None:
-                probe_gait = gait_embedder.embed(observations)
+                probe_gait = gait_embedder.embed(ordered)
                 if probe_gait.has_signal:
                     probes[Modality.GAIT] = probe_gait
             if reid_embedder is not None:
-                probe_reid = reid_embedder.embed(observations)
+                probe_reid = reid_embedder.embed(sampled)
                 if probe_reid.has_signal:
                     probes[Modality.REID] = probe_reid
 

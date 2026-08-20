@@ -185,3 +185,29 @@ matching:
   reid_threshold: 0.88
   min_track_observations: 5
   rematch_every: 15
+  # Embedding all 64 buffered crops made the face branch 70% of runtime at
+  # 5.3s per track. Aggregation is quality-weighted, so the poorest crops
+  # barely move the result. 0 disables the cap.
+  max_observations_to_embed: 16
+
+# --- Phase 9: alerting -----------------------------------------------------
+# Alerts fire ONLY on human-confirmed decisions. Sending additionally requires
+# --send on the CLI, because accidentally messaging a real contact list during
+# testing cannot be undone.
+#
+# Credentials belong in the environment, not here. See .env.example:
+#   FRS_ALERTS__SMTP_PASSWORD, FRS_ALERTS__TWILIO_AUTH_TOKEN
+alerts:
+  transport: console        # console | smtp | twilio
+
+  smtp_host: ""
+  smtp_port: 587
+  smtp_sender: ""
+  smtp_use_tls: true
+  smtp_recipients: ""       # comma-separated
+
+  twilio_from_number: ""
+  twilio_to_numbers: ""     # comma-separated
+
+  # Linked from SMS alerts, which are too short to carry the full breakdown.
+  console_url: "http://localhost:5173"

@@ -98,14 +98,18 @@ httpx>=0.27                      # FastAPI's TestClient depends on it
 # ---------------------------------------------------------------------------
 # Phase 9 - alerting
 # ---------------------------------------------------------------------------
+# SMTP needs nothing extra (stdlib). Twilio is optional and only imported when
+# the twilio transport is actually selected:
 # twilio>=9.0,<10.0
 
 # ---------------------------------------------------------------------------
-# Phase 10 - evaluation metrics
+# Phase 10 - evaluation metrics  [ACTIVE - no extra dependencies]
 # ---------------------------------------------------------------------------
-# scikit-learn>=1.5,<2.0
+# eval/metrics.py implements TAR@FAR, ROC-AUC, EER and CMC directly on numpy.
+# scikit-learn would be a large dependency for four functions, and computing
+# them here means the definitions are visible and checkable rather than
+# delegated. matplotlib is only needed if you want to plot the curves:
 # matplotlib>=3.8,<4.0
-# pandas>=2.2,<3.0
 
 # ---------------------------------------------------------------------------
 # Future scope - vector search once the watchlist grows

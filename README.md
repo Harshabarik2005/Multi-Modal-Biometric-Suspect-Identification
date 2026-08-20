@@ -14,12 +14,13 @@ Identification"* (2023, [arXiv:2303.13814](https://arxiv.org/abs/2303.13814)).
 The full spec, including where this project deliberately diverges from the
 paper, is in [faceless-frs-build-plan.md](faceless-frs-build-plan.md).
 
-> **Status: Phases 1–5, 7 and 8 complete; phase 6 built but not deployable.**
-> All three modalities work end to end, matching fuses them with calibrated
-> scores, and there is a FastAPI backend plus a React review console with an
-> audited, human-confirmed decision workflow. The keyless attention head
-> (phase 6) is implemented and trains, but only on synthetic data — it
-> refuses to run untrained.
+> **Status: all 11 phases implemented. 273 tests pass.**
+>
+> What is *not* done is validation on real footage, and that blocks the
+> project's central claim: whether attention fusion beats the fixed-rule
+> baselines has never been tested on real data. The evaluation harness that
+> would settle it is built and waiting for input. Every threshold in the
+> system is a placeholder measured on one or two clips.
 
 ## Responsible use
 
@@ -213,12 +214,12 @@ backend/
                    attention.py, training.py   [Phase 6, untrained]
     api/           FastAPI routes + app factory          [Phase 7 ✓]
     db/            models + repository                    [Phase 7 ✓]
-    alerts/        Twilio / SMTP                         [Phase 9]
+    alerts/        Twilio / SMTP, confirmed-only gate    [Phase 9 ✓]
     pipeline.py    detection + tracking spine            [Phase 1 ✓]
   scripts/         CLI entry points
   tests/
 frontend/          React review console                  [Phase 8 ✓]
-eval/              TAR@FAR, ROC-AUC, CMC, ablation table [Phase 10]
+eval/              TAR@FAR, ROC-AUC, CMC, ablation table [Phase 10 ✓]
 data/
   enrollment/      per-person reference footage          (git-ignored)
   test_videos/     CCTV test clips                       (git-ignored)
@@ -304,9 +305,72 @@ of the three signals and goes stale.
 Confirming requires a name, and that name is recorded on the decision. Nothing
 becomes actionable until someone does it.
 
-## Next: Phase 9
+## Alerting (Phase 9)
 
-Alerting (Twilio / SMTP), gated on confirmed decisions only. See
+```bash
+cd backend && python scripts/send_alerts.py
+```
+
+Dry run by default — it shows exactly what would be delivered. `--send` is
+required to actually notify, and `--transport smtp|twilio` selects how.
+
+Alerts fire **only** on decisions a human has confirmed, and the gate is
+checked twice: once when selecting decisions, once immediately before sending.
+Every alert names the confirming operator and lists which modalities drove the
+score, because a notification saying only "match found, 0.91" invites exactly
+the unexamined trust the review step exists to prevent.
+
+## Evaluation (Phase 10)
+
+```bash
+cd backend && python ../eval/run_evaluation.py --synthetic --people 80 --sightings 8 --fairness
+```
+
+Produces the ablation table — each modality alone, then each fusion rule — with
+TAR@FAR, ROC-AUC, EER and CMC, plus a per-group fairness breakdown.
+
+It prints **two** tables, and the reason matters. A single-modality row can only
+score pairs where that modality is visible on both sides, so "face only" gets
+graded on the easy cases. Comparing its AUC against fusion's directly is
+meaningless. The first table shows each row on its own coverage; the second
+restricts everything to pairs where all three modalities are present, which is
+the only like-for-like comparison.
+
+What that shows: face alone beats fusion when a face is available (0.949 vs
+0.811 AUC) — but it is only available on **33%** of pairs, against fusion's
+**97%**. Fusion buys coverage, not peak accuracy. In deployment the alternative
+to a fused score on a turned-away person is no score at all.
+
+## Robustness and performance (Phase 11)
+
+```bash
+cd backend && python scripts/test_disguise.py
+```
+```bash
+cd backend && python scripts/benchmark.py
+```
+
+The first measures the face branch under synthetic masks, sunglasses and hoods.
+Similarity and quality fall together, which is what fusion needs — a masked
+face still matches at 0.741, while masked *and* wearing sunglasses drops to
+0.254 and correctly does not.
+
+The second times each stage. It found face embedding taking 70% of runtime at
+5.3s per track; capping the live path at the best 16 crops halved total runtime.
+
+## The honest limits
+
+Everything is implemented; almost nothing is validated on real people.
+
+1. **Gait has no positive validation** — the negative direction is tested on
+   real video, the positive rests on synthetic silhouettes.
+2. **The attention head refuses to run**, because it can only be trained on
+   synthetic data and an untrained head is worse than the fixed rules.
+3. **The central claim is unproven** — whether attention fusion beats
+   `quality_weighted` has never been tested on real data.
+
+Real footage means several people, each recorded more than once, ideally at
+different times and cameras, with consent and a lawful basis. See
 [docs/phase-notes.md](docs/phase-notes.md).
 
 Two standing caveats on modality strength. Gait uses a **classical GEI
