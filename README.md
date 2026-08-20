@@ -14,8 +14,9 @@ Identification"* (2023, [arXiv:2303.13814](https://arxiv.org/abs/2303.13814)).
 The full spec, including where this project deliberately diverges from the
 paper, is in [faceless-frs-build-plan.md](faceless-frs-build-plan.md).
 
-> **Status: Phase 1 complete.** Detection and tracking run end to end. No
-> embedding models are wired in yet — that starts at Phase 2.
+> **Status: Phase 2 complete.** Detection, tracking, and the face branch run
+> end to end: you can enroll a person from video and match them in other
+> footage. Gait and re-ID (phases 3–4) are not wired in yet.
 
 ## Responsible use
 
@@ -98,6 +99,47 @@ Useful flags:
 The run ends with a report: frames processed, total person detections, and one
 row per track ID showing how many frames it survived.
 
+## Enroll and match (Phase 2)
+
+Generate smoke-test fixtures if you have no footage yet:
+
+```bash
+cd backend && python scripts/make_face_fixtures.py
+```
+
+Enroll someone. The footage should show **one** person, ideally rotating
+through 360° so the reference covers several angles:
+
+```bash
+cd backend && python scripts/enroll.py --source ../data/test_videos/enroll_subject_a.mp4 --person-id subject_a --name "Test Subject A"
+```
+
+InsightFace downloads its model pack (~280MB) to `~/.insightface` on first run.
+`--list` shows who is enrolled, `--inspect <id>` shows one record in detail.
+
+Then match against other footage:
+
+```bash
+cd backend && python scripts/match.py --source ../data/test_videos/probe_two_subjects.mp4 --show-all
+```
+
+`--show-all` also prints below-threshold tracks, which is what you need when
+calibrating the threshold. Nothing is acted on automatically — matches are
+printed as candidates for a human to confirm.
+
+### Encrypting stored templates
+
+Biometric templates are personal data and the build plan requires them
+encrypted at rest. Generate a key and put it in your environment:
+
+```bash
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+Set it as `FRS_TEMPLATE_ENCRYPTION_KEY` (see `.env.example`). Without it,
+enrollment still works but warns on every save, and templates sit on disk in
+the clear. Records encrypted with a key cannot be read back without it.
+
 ## Tests
 
 ```bash
@@ -129,10 +171,11 @@ Precedence: CLI flags > environment variables > `config.yaml`.
 ```
 backend/
   app/
-    core/          config, logging, shared types, video reader
+    core/          config, logging, shared types, video reader, track buffer
     detection/     YOLOv8 wrapper                        [Phase 1 ✓]
     tracking/      DeepSORT wrapper                      [Phase 1 ✓]
-    embeddings/    face.py / gait.py / reid.py           [Phases 2-4]
+    embeddings/    face.py [Phase 2 ✓] / gait.py, reid.py [Phases 3-4]
+    matching/      watchlist gallery + open-set ranking  [Phase 2 ✓]
     fusion/        baseline.py / attention.py            [Phases 5-6]
     api/           FastAPI routes                        [Phase 7]
     db/            models + migrations                   [Phase 7]
@@ -149,11 +192,13 @@ data/
 docs/
 ```
 
-Modules for phases 2+ exist as documented placeholders that raise
+Modules for phases 3+ exist as documented placeholders that raise
 `NotImplementedError` — the layout is in place, the code is not.
 
-## Next: Phase 2
+## Next: Phase 3
 
-Face branch only. Enroll one person, match against a test video by cosine
-similarity, and get one modality fully working before adding the other two.
-See [docs/phase-notes.md](docs/phase-notes.md).
+Gait branch. One risk to settle before writing code: the plan assumes
+pretraining on CASIA-B, which is licence-gated and has been unreliable to
+obtain. Whether OpenGait's published checkpoints are usable independently of
+that dataset licence decides the approach. See
+[docs/phase-notes.md](docs/phase-notes.md) for the fallbacks.

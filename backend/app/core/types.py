@@ -8,6 +8,7 @@ coordinates of the source frame.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 
 import numpy as np
 
@@ -89,3 +90,109 @@ class FrameResult:
     timestamp_s: float
     detections: list[Detection] = field(default_factory=list)
     tracks: list[Track] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Modality embeddings (Phases 2-4) and their fusion (Phases 5-6)
+# ---------------------------------------------------------------------------
+
+
+class Modality(str, Enum):
+    """The three signals this system fuses."""
+
+    FACE = "face"
+    GAIT = "gait"
+    REID = "reid"
+
+
+@dataclass(slots=True)
+class ModalityEmbedding:
+    """One modality's read on one person.
+
+    `vector` is None when the modality had nothing to say -- no face visible,
+    too few frames for a gait cycle. That is the *normal* case in this system,
+    not an error: the whole premise is that face frequently fails and the other
+    branches carry the identification. Callers must check `has_signal` rather
+    than assuming a vector exists.
+
+    `quality` in [0, 1] is how much this observation should be trusted. It is
+    not a match score -- it says "this is a good look at the person", not "this
+    is the person". The Phase-6 attention head consumes it, so a branch that
+    returns a constant quality silently disables the adaptive weighting that is
+    the point of the project.
+    """
+
+    modality: Modality
+    vector: np.ndarray | None = None
+    quality: float = 0.0
+    # How many frames actually contributed. Distinguishes a confident read of
+    # 40 frames from a lucky single frame at the same quality.
+    frames_used: int = 0
+    # Free-form per-branch detail, surfaced in the explainability view:
+    # face stores yaw/pitch, gait stores cycles detected, etc.
+    detail: dict[str, float] = field(default_factory=dict)
+
+    @property
+    def has_signal(self) -> bool:
+        return self.vector is not None and self.vector.size > 0
+
+    @classmethod
+    def empty(cls, modality: Modality, reason: str = "") -> "ModalityEmbedding":
+        """A clean 'nothing to report' result."""
+        return cls(
+            modality=modality,
+            vector=None,
+            quality=0.0,
+            frames_used=0,
+            detail={"no_signal": 1.0} if reason else {},
+        )
+
+    def similarity(self, other: "ModalityEmbedding") -> float | None:
+        """Cosine similarity against another embedding of the same modality.
+
+        Returns None when either side has no signal, so "could not compare"
+        never silently collapses into "compared and got zero" -- those mean
+        very different things to the fusion stage.
+        """
+        if self.modality is not other.modality:
+            raise ValueError(
+                f"Cannot compare {self.modality} with {other.modality}"
+            )
+        if not self.has_signal or not other.has_signal:
+            return None
+        return cosine_similarity(self.vector, other.vector)
+
+
+@dataclass(slots=True)
+class TrackObservation:
+    """One frame's look at one tracked person.
+
+    The unit the embedding branches consume. Holds the crop rather than the
+    whole frame: a busy scene has many tracks, and keeping full frames per
+    track exhausts memory fast.
+    """
+
+    frame_index: int
+    timestamp_s: float
+    crop: np.ndarray
+    box_height: float
+    detection_confidence: float
+
+
+def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
+    """Cosine similarity between two vectors, safe against zero norms."""
+    a = np.asarray(a, dtype=np.float32).ravel()
+    b = np.asarray(b, dtype=np.float32).ravel()
+    if a.shape != b.shape:
+        raise ValueError(f"Shape mismatch: {a.shape} vs {b.shape}")
+    denom = float(np.linalg.norm(a) * np.linalg.norm(b))
+    if denom == 0.0:
+        return 0.0
+    return float(np.dot(a, b) / denom)
+
+
+def l2_normalize(vector: np.ndarray) -> np.ndarray:
+    """Scale a vector to unit length. A zero vector is returned unchanged."""
+    vector = np.asarray(vector, dtype=np.float32).ravel()
+    norm = float(np.linalg.norm(vector))
+    return vector if norm == 0.0 else vector / norm

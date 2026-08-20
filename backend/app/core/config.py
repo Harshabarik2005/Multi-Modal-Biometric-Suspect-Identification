@@ -72,6 +72,64 @@ class TrackingSettings(BaseModel):
     embedder_gpu: bool = True
 
 
+class FaceSettings(BaseModel):
+    """Phase 2: ArcFace / InsightFace face branch."""
+
+    # InsightFace model pack. buffalo_l is the accurate default (~280MB,
+    # downloads to ~/.insightface on first use); buffalo_s is smaller/faster.
+    model_pack: str = "buffalo_l"
+    det_size: int = 640
+    # Requires onnxruntime-gpu built for the installed CUDA; the plain
+    # onnxruntime wheel is CPU-only and this silently falls back.
+    use_gpu: bool = False
+
+    # Frames needed before the branch will report a face embedding at all.
+    min_frames: int = 1
+    # Per-frame quality floor. Below this the frame is treated as no signal.
+    min_quality: float = Field(0.15, ge=0.0, le=1.0)
+
+    # Yaw (degrees) up to which a face counts as fully frontal, and the yaw at
+    # which it is considered useless. ArcFace degrades sharply in between.
+    frontal_yaw_deg: float = 20.0
+    max_yaw_deg: float = 65.0
+    # Face height in pixels at which resolution stops being a limiting factor.
+    ideal_face_height: float = 112.0
+
+    # Enrollment keeps only this top fraction of usable frames by quality, so
+    # profile and back-of-head frames do not blur the reference vector.
+    enroll_top_fraction: float = Field(0.4, gt=0.0, le=1.0)
+    enroll_min_frames: int = 10
+
+
+class TrackBufferSettings(BaseModel):
+    """Per-track frame buffering that feeds the embedding branches."""
+
+    # Hard cap on observations held per track. Unbounded buffers are how a
+    # busy camera exhausts memory: 20 tracks x thousands of frames of crops.
+    max_observations: int = 64
+    # Crops are stored downscaled to this height; anything taller is resized.
+    # 256px is comfortably above what ArcFace and OSNet need.
+    store_height: int = 256
+    # Skip observations whose box is shorter than this - too small to embed.
+    min_box_height: int = 60
+    # Ceiling on simultaneously buffered tracks; least-recently-seen is dropped.
+    max_tracks: int = 50
+
+
+class MatchingSettings(BaseModel):
+    """Open-set matching against the watchlist gallery."""
+
+    # Cosine similarity above which a track is considered a candidate match.
+    # Calibrate on real footage via the Phase-10 TAR@FAR curve rather than
+    # trusting this default.
+    face_threshold: float = Field(0.40, ge=-1.0, le=1.0)
+    # Minimum observations before a track is matched at all, so an identity is
+    # never asserted off a single frame.
+    min_track_observations: int = 5
+    # Re-match a live track at most this often (in processed frames).
+    rematch_every: int = 15
+
+
 class VideoSettings(BaseModel):
     frame_stride: int = Field(1, ge=1)
     max_frames: int | None = None
@@ -98,6 +156,9 @@ class Settings(BaseSettings):
     tracking: TrackingSettings = TrackingSettings()
     video: VideoSettings = VideoSettings()
     logging: LoggingSettings = LoggingSettings()
+    face: FaceSettings = FaceSettings()
+    track_buffer: TrackBufferSettings = TrackBufferSettings()
+    matching: MatchingSettings = MatchingSettings()
 
     @classmethod
     def settings_customise_sources(

@@ -60,3 +60,36 @@ logging:
   level: INFO
   # Log a progress line every N processed frames.
   progress_every: 30
+
+# --- Phase 2: face branch --------------------------------------------------
+face:
+  # buffalo_l downloads ~280MB to ~/.insightface on first use.
+  model_pack: buffalo_l
+  det_size: 640
+  # Needs onnxruntime-gpu matching your CUDA build; the plain onnxruntime
+  # wheel is CPU-only and this falls back with a warning.
+  use_gpu: false
+  min_frames: 1
+  min_quality: 0.15
+  # ArcFace degrades sharply with yaw, so a confidently-detected profile face
+  # is scored down even though the detector was sure it found a face.
+  frontal_yaw_deg: 20.0
+  max_yaw_deg: 65.0
+  ideal_face_height: 112.0
+  enroll_top_fraction: 0.4
+  enroll_min_frames: 10
+
+track_buffer:
+  # Bounded on purpose: unbounded per-track crop buffers exhaust memory on a
+  # busy camera long before anything else breaks.
+  max_observations: 64
+  store_height: 256
+  min_box_height: 60
+  max_tracks: 50
+
+matching:
+  # Starting point only. Calibrate against your own footage with the Phase-10
+  # TAR@FAR curve before trusting any number here.
+  face_threshold: 0.40
+  min_track_observations: 5
+  rematch_every: 15

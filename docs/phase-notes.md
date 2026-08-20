@@ -105,26 +105,125 @@ suite 27 passed (26 fast + 1 end-to-end under `--run-slow`).
 
 ---
 
-## Phase 2 — face branch (next)
+## Phase 2 — face branch ✅
 
-Goal: enroll one person, match them in a test video by cosine similarity. One
-modality working end to end before adding the others.
+**Delivered:** enroll a person from video, match them in other footage by
+cosine similarity against ArcFace embeddings, with a pose-aware quality score
+and encrypted template storage.
 
-Rough shape:
+| File | Role |
+|---|---|
+| `app/core/types.py` | `Modality`, `ModalityEmbedding`, `TrackObservation` — the branch contract |
+| `app/embeddings/base.py` | `EmbeddingBranch` / `PerFrameBranch` ABCs |
+| `app/embeddings/face.py` | `FaceEmbedder` — ArcFace + quality scoring |
+| `app/core/track_buffer.py` | Bounded per-track observation buffers |
+| `app/matching/gallery.py` | Watchlist, open-set ranking, encrypted storage |
+| `scripts/enroll.py` | Enrollment CLI (`--list`, `--inspect`) |
+| `scripts/match.py` | Matching CLI |
+| `scripts/make_face_fixtures.py` | Smoke-test fixtures |
 
-1. `pip install insightface onnxruntime-gpu` (uncomment in `requirements.txt`).
-2. Implement `app/embeddings/face.py`: track crop → face detect/align → ArcFace
-   → L2-normalised 512-d embedding, plus a per-frame quality score. That score
-   is not optional garnish — Phase 6's attention head consumes it.
-3. Enrollment script: 360° rotation video → pose-guided face crops → averaged
-   reference embedding, written to `data/enrollment/<person_id>/`.
-4. Matching script: run the Phase-1 pipeline, embed each track's face crops,
-   compare against the reference by cosine similarity.
-5. Sanity threshold: ArcFace cosine similarity above ~0.4 is a plausible
-   starting point for same-person, but calibrate it on your own footage rather
-   than trusting the number — Phase 10's TAR@FAR curve is what actually sets it.
+### Decisions worth remembering
 
-Watch out for: no face visible in a crop (back turned) is the *normal* case
-here, not an error path. The branch must return "no signal" cleanly and let
-fusion lean on gait and re-ID instead. That is the entire premise of the
-project.
+**Gait is not a per-frame signal, and the interface admits it.** Face and
+re-ID embed one crop at a time; gait needs a sequence spanning a step cycle.
+So every branch takes a *sequence* and returns one embedding: `PerFrameBranch`
+implements that aggregation for face and re-ID, and Phase 3's gait branch will
+implement `embed()` directly. Forcing gait through a per-frame interface would
+have meant faking it, and a fake gait signal is worse than none — fusion would
+weight it as real.
+
+**"No signal" is not an error, and not zero.** `ModalityEmbedding.similarity()`
+returns `None` when either side has nothing, never `0.0`. Collapsing those
+would let a missing modality read as positive evidence of a mismatch. Face
+absent (person turned away) is the *normal* case in this project.
+
+**Quality is not detection confidence.** The detector will confidently locate
+a face turned 67° away, from which ArcFace produces a confident and wrong
+embedding. Quality multiplies three independent failure modes — detection
+confidence × frontality × resolution — so any one of them failing drags the
+score down. This is the signal Phase 6's attention head consumes; a branch
+returning constant quality would silently disable the adaptive weighting the
+whole project rests on.
+
+**Enrollment is pickier than matching.** `embed_reference()` keeps only the
+top 40% of usable frames by quality. Enrollment is offline with hundreds of
+frames to choose from; averaging in profile and back-of-head frames would blur
+the reference toward the population mean and cost accuracy on every subsequent
+match. Live matching cannot afford to be that choosy.
+
+**Track-level quality is the best frame, not the mean.** One unambiguous
+frontal frame is enough to trust an identification; averaging would punish it
+for the poor frames around it. Aggregation is quality-weighted for the same
+reason — ten turned-away frames must not outvote one clear look by sheer
+numbers.
+
+**Buffers are bounded in three directions.** Per track (64 observations, most
+recent kept), per crop (downscaled to 256px), and across tracks (50, LRU
+evicted). The build plan's "per-track frame buffer" written naively is an
+unbounded dict of crop lists — the fastest way to exhaust 4GB on a busy camera.
+
+**Templates are encrypted at rest when a key is set.** `FRS_TEMPLATE_ENCRYPTION_KEY`
+turns on Fernet encryption; without it enrollment still works but warns loudly
+on every save. Verified: encrypted files carry a `FRSENC1:` header with no
+numpy `PK` magic in the clear, and loading without the key fails closed while
+the rest of the watchlist still loads.
+
+### Verified on this machine
+
+Enrolled one subject from a 40-frame clip (38 tracked frames, top 16 kept,
+quality 0.499), then matched against a clip containing that subject plus a
+second person, mirrored/dimmed/blurred so it is not a pixel-identical compare:
+
+| Track | Cosine vs reference | Outcome |
+|---|---|---|
+| enrolled subject | **+0.947** | match at threshold 0.40 |
+| impostor (quality gate bypassed) | **+0.045** | no match |
+
+Separation of ~0.90. Independently, the quality gate rejected the impostor
+outright at yaw −67° before any comparison happened — two separate safeguards,
+tested separately, because a test that conflates them proves neither.
+
+Full suite: 64 passed (60 fast + 4 slow).
+
+### Known limits at this phase
+
+- **The fixtures derive from one photograph.** They prove the machinery —
+  crop → embed → store → load → cosine → threshold — and nothing about
+  real-world accuracy. One pose, one lighting condition, no time gap. Real
+  validation needs a person enrolled across angles then found in separate
+  footage shot at a different time.
+- **`track_buffer.store_height` trades memory against face resolution.** At
+  256px, a 514px body crop halves, taking its face from ~137px to ~68px and
+  roughly halving the quality score (resolution term 0.62 rather than 1.0).
+  Raising it improves face quality at direct memory cost — 64 obs × 50 tracks
+  is already ~370MB of crops at the current default. Tune against your camera.
+- **Face runs on CPU.** The stock `onnxruntime` wheel has no CUDA provider, and
+  `onnxruntime-gpu` needs CUDA/cuDNN matching the torch build. Not the
+  bottleneck, and the code falls back with a warning rather than failing.
+- **The 0.40 threshold is a placeholder.** It sits comfortably between 0.95 and
+  0.05 on a trivially easy fixture. Phase 10's TAR@FAR curve is what should
+  actually set it, on real footage.
+- InsightFace emits a `FutureWarning` about `rcond` from its own
+  `transform.py`. Upstream, harmless.
+
+---
+
+## Phase 3 — gait branch (next)
+
+**Unresolved risk, and it should be settled before writing code:** the plan
+assumes pretraining on CASIA-B, but that dataset requires a signed agreement
+and its distribution has reportedly been unreliable. Whether OpenGait's
+published GaitSet/GaitGL checkpoints are redistributable independently of the
+dataset licence is the question to answer first. If pretrained gait weights
+turn out not to be practically obtainable, the honest fallbacks are:
+
+- Gait Energy Images plus a small encoder trained on your own footage.
+- Skeleton-based gait from YOLOv8-pose keypoints, which may in any case be more
+  robust than silhouettes at CCTV resolution.
+- Treating gait as a low-weight modality initially and letting the attention
+  head learn to discount it.
+
+Whichever path, the branch implements `EmbeddingBranch.embed()` directly over a
+sequence and returns clean "no signal" when it has fewer frames than one gait
+cycle. Silhouettes can come from YOLOv8-seg (ultralytics is already installed)
+or, for a fixed camera, classical background subtraction.

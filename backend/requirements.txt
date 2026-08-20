@@ -50,10 +50,23 @@ pytest>=8.0,<9.0
 pytest-cov>=5.0,<7.0
 
 # ---------------------------------------------------------------------------
-# Phase 2 - face branch (ArcFace / InsightFace)
+# Phase 2 - face branch (ArcFace / InsightFace)  [ACTIVE]
 # ---------------------------------------------------------------------------
-# insightface>=0.7.3
-# onnxruntime-gpu>=1.18        # or onnxruntime for CPU-only
+# insightface 1.0.1 ships prebuilt wheels, so the old C++/Cython build step on
+# Windows is no longer needed. It works with numpy 1.x; pip will try to pull
+# numpy 2 if left unconstrained, hence the pin at the top of this file.
+insightface>=1.0.1,<2.0
+# CPU ONNX runtime. InsightFace does not share torch's CUDA context, and
+# onnxruntime-gpu needs its own CUDA/cuDNN matching your torch build - a
+# frequent source of version conflicts. Face inference is not the pipeline
+# bottleneck, so CPU is the safe default. To try GPU:
+#   pip uninstall onnxruntime && pip install onnxruntime-gpu
+# then set face.use_gpu: true. The code falls back to CPU with a warning if the
+# CUDA execution provider is not actually available.
+onnxruntime>=1.17,<2.0
+
+# Encryption at rest for biometric templates (build plan, section 8).
+cryptography>=42.0
 
 # ---------------------------------------------------------------------------
 # Phase 3 - gait branch (silhouettes + GaitSet/GaitGL on GEI)
@@ -74,7 +87,6 @@ pytest-cov>=5.0,<7.0
 # sqlalchemy>=2.0,<3.0
 # alembic>=1.13,<2.0
 # psycopg[binary]>=3.1,<4.0
-# cryptography>=42.0           # encryption-at-rest for biometric templates
 
 # ---------------------------------------------------------------------------
 # Phase 9 - alerting
