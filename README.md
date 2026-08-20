@@ -14,11 +14,12 @@ Identification"* (2023, [arXiv:2303.13814](https://arxiv.org/abs/2303.13814)).
 The full spec, including where this project deliberately diverges from the
 paper, is in [faceless-frs-build-plan.md](faceless-frs-build-plan.md).
 
-> **Status: Phases 1–5 and 7 complete; phase 6 built but not deployable.**
+> **Status: Phases 1–5, 7 and 8 complete; phase 6 built but not deployable.**
 > All three modalities work end to end, matching fuses them with calibrated
-> scores, and there is a FastAPI backend with an audited, human-confirmed
-> decision workflow. The keyless attention head (phase 6) is implemented and
-> trains, but only on synthetic data — it refuses to run untrained.
+> scores, and there is a FastAPI backend plus a React review console with an
+> audited, human-confirmed decision workflow. The keyless attention head
+> (phase 6) is implemented and trains, but only on synthetic data — it
+> refuses to run untrained.
 
 ## Responsible use
 
@@ -216,7 +217,7 @@ backend/
     pipeline.py    detection + tracking spine            [Phase 1 ✓]
   scripts/         CLI entry points
   tests/
-frontend/          enrollment UI, live dashboard         [Phase 8]
+frontend/          React review console                  [Phase 8 ✓]
 eval/              TAR@FAR, ROC-AUC, CMC, ablation table [Phase 10]
 data/
   enrollment/      per-person reference footage          (git-ignored)
@@ -276,10 +277,37 @@ or templates are written unencrypted and every write logs a warning saying so.
 The database file is git-ignored — it holds biometric templates and the whole
 audit trail.
 
-## Next: Phase 8
+## The review console (Phase 8)
 
-React dashboard: enrollment flow, live monitoring, alerts, and the
-explainability view. See [docs/phase-notes.md](docs/phase-notes.md).
+Run the API and the dashboard together:
+
+```bash
+cd backend && python scripts/serve.py
+```
+```bash
+cd frontend && npm install && npm run dev
+```
+
+Then open `http://localhost:5173`. Feed it candidates by running the matcher
+with `--record`:
+
+```bash
+cd backend && python scripts/match.py --source <clip> --from-db --record --camera-id cam-1
+```
+
+The review queue is the screen that matters. Each candidate shows the fused
+score, which modalities drove it, and what each of those actually measures —
+so a reviewer can judge the match rather than trust it. When more than half the
+decision rests on appearance, the card says so, because clothing is the weakest
+of the three signals and goes stale.
+
+Confirming requires a name, and that name is recorded on the decision. Nothing
+becomes actionable until someone does it.
+
+## Next: Phase 9
+
+Alerting (Twilio / SMTP), gated on confirmed decisions only. See
+[docs/phase-notes.md](docs/phase-notes.md).
 
 Two standing caveats on modality strength. Gait uses a **classical GEI
 descriptor, not a learned embedding**, because OpenGait ships no licence file

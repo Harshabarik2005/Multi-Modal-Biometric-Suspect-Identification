@@ -725,16 +725,96 @@ Full suite: **206 passed**.
 
 ---
 
-## Phase 8 — frontend dashboard (next)
+## Phase 8 — frontend dashboard ✅
 
-React: enrollment flow, live monitoring, alerts, and the explainability view.
+**Delivered:** a React review console — review queue with the explainability
+view, watchlist, confirmed identifications, and the audit trail.
 
-The API already returns what the explainability view needs — every decision
-carries `weights` and `calibrated` per modality, plus its strategy. The screen
-that matters most is the review queue: it has to show a reviewer *why* a match
-fired before they confirm it, because a match driven by a jacket and one driven
-by a clear face deserve very different levels of confidence, and the numbers to
-tell them apart are already in the payload.
+| File | Role |
+|---|---|
+| `frontend/src/App.jsx` | the console: queue, watchlist, alerts, audit |
+| `frontend/src/api.js` | API client, modality metadata, appearance share |
+| `frontend/src/styles.css` | dark console theme |
+| `frontend/vite.config.js` | dev server, proxies `/api` to the backend |
 
-Before the dashboard can show anything live, `scripts/match.py` needs to write
-its candidates to the database via `record_match` rather than printing them.
+Also: `scripts/match.py --record` now writes candidates to the database, which
+is what gives the dashboard live data.
+
+### The screen that matters is the review queue
+
+Section 8 requires a human to confirm before anything follows from a match.
+That is only meaningful if the human can tell a *good* match from a *plausible*
+one, so each candidate shows:
+
+- the fused score,
+- a proportional bar of which modalities drove it,
+- a table of per-modality weight, calibrated score, and what that modality
+  actually measures ("Build and clothing", not "reid"),
+- the fusion strategy used.
+
+**And a caution when a match rests mostly on appearance.** Re-ID encodes
+clothing more than the person, so when it carries over half the weight the card
+says so explicitly rather than leaving the reviewer to infer it from a number.
+On the live test data this fired immediately: the top candidate scored 0.909
+with re-ID at 54% against face at 46% — exactly the Phase-5 weighting flaw,
+now visible to the person being asked to confirm the identification.
+
+The card also says "Nothing has happened yet — confirming is what makes this
+actionable", because a queue of alarming-looking cards invites the assumption
+that something already has.
+
+### Decisions worth remembering
+
+**The operator name is required and recorded, not implied.** It persists in
+`localStorage` so a reviewer does not retype it, but it is still sent with every
+verdict — the API rejects a blank one. An anonymous confirmation is not an
+audit trail.
+
+**No biometric data crosses into the browser.** The API describes templates but
+never returns vectors, so there is nothing in the frontend that could leak one.
+The watchlist view flags any template stored *unencrypted* with a warning
+marker, so a misconfigured deployment is visible rather than silent.
+
+**Vite proxies `/api` to the backend** rather than enabling CORS, which keeps
+the browser on one origin and means there is no CORS policy to get wrong.
+
+### Verified on this machine
+
+Ran the API and dev server together against the real database, and reviewed a
+candidate through the UI:
+
+- the queue showed 3 pending candidates with their weight breakdowns,
+- the appearance caution fired on the 54%-re-ID candidate,
+- confirming as "Harsha" took pending from 3 to 2,
+- the decision appeared in `/alerts` as actionable,
+- the audit trail recorded `review by Harsha`.
+
+Production build: 153 kB JS (49 kB gzipped). Full suite: **192 passed**.
+
+### Known limits at this phase
+
+- **No live video in the dashboard.** "Live monitoring" in the build plan means
+  camera feeds; this shows decisions the matcher has already written. Streaming
+  frames to the browser is a substantially larger piece of work.
+- **No enrollment flow in the UI.** Enrolment still runs through
+  `scripts/enroll.py` — the API has no upload endpoint yet, so there is nothing
+  for a form to post to.
+- **No authentication**, so the operator field records a claimed name rather
+  than a verified identity. Same limitation as Phase 7, and it matters more
+  here because this is the screen where the name gets typed.
+- The queue polls every 10 seconds. Fine at this scale; a websocket would be
+  better for a real feed.
+- No frontend tests. The backend is well covered, the UI is not.
+
+---
+
+## Phase 9 — alerting (next)
+
+Twilio / SMTP, gated on `/alerts` — confirmed decisions only. The gate already
+exists and is tested, so the work is the notification transport plus a record
+of what was sent to whom, which belongs in the audit trail alongside everything
+else.
+
+The one thing to get right: an alert must carry the same explainability the
+dashboard shows. A notification that says only "match found, 0.91" invites
+exactly the unexamined trust the review step exists to prevent.

@@ -96,6 +96,7 @@ def _report(
     verdicts: dict[int, TrackVerdict],
     threshold: float,
     show_all: bool,
+    recorded: int = 0,
 ) -> int:
     print()
     print("=" * 74)
@@ -154,6 +155,11 @@ def _report(
         "No action has been taken. Every candidate above requires a human to\n"
         "confirm before anything follows from it (build plan, section 8)."
     )
+    if recorded:
+        print(
+            f"\n{recorded} decision(s) written to the database as PENDING.\n"
+            "Review them at /api/decisions, or in the dashboard."
+        )
     print("=" * 74)
     return len(matched)
 
@@ -166,7 +172,26 @@ def run(args: argparse.Namespace) -> int:
         settings.video.max_frames = args.max_frames
     setup_logging(settings.logging.level)
 
-    gallery = GalleryStore(settings).load_gallery()
+    repo = None
+    if args.record or args.from_db:
+        from app.db.repository import (
+            WatchlistRepository,
+            create_schema,
+            make_engine,
+            session_factory,
+        )
+
+        database_url = args.db_url or (
+            f"sqlite:///{settings.paths.data_dir / 'faceless_frs.db'}"
+        )
+        engine = make_engine(database_url)
+        create_schema(engine)
+        repo = WatchlistRepository(session_factory(engine)())
+        gallery = repo.load_gallery()
+        print(f"Watchlist source: {database_url}")
+    else:
+        gallery = GalleryStore(settings).load_gallery()
+
     if len(gallery) == 0:
         print(
             "The watchlist is empty -- nothing to match against.\n"
@@ -187,6 +212,7 @@ def run(args: argparse.Namespace) -> int:
         args.strategy or settings.fusion.strategy, default_calibrations(settings)
     )
     verdicts: dict[int, TrackVerdict] = {}
+    recorded = 0
 
     print(f"Watchlist: {len(gallery)} enrolled.")
     print(
@@ -285,6 +311,25 @@ def run(args: argparse.Namespace) -> int:
                     )
                 )
                 # Audit trail: every match decision is logged with what drove it.
+                if repo is not None and args.record:
+                    # Written as PENDING. Nothing downstream may act on it
+                    # until a named human reviews it -- the confirm step is
+                    # enforced by the schema, not by this script.
+                    calibrated = (
+                        best.fusion.calibrated if best.fusion else {}
+                    )
+                    repo.record_match(
+                        best.person.person_id,
+                        track_id=track_id,
+                        score=best.fused_similarity,
+                        strategy=strategy.name,
+                        weights=best.weights,
+                        calibrated=calibrated,
+                        camera_id=args.camera_id,
+                        frame_index=result.frame_index,
+                    )
+                    recorded += 1
+
                 # Audit trail (build plan, section 8): every match decision
                 # is logged with the per-modality weights that produced it, so
                 # a reviewer can later see what the system actually relied on.
@@ -297,7 +342,9 @@ def run(args: argparse.Namespace) -> int:
                     best.explain(),
                 )
 
-    matched = _report(verdicts, settings.fusion.threshold, args.show_all)
+    matched = _report(
+        verdicts, settings.fusion.threshold, args.show_all, recorded
+    )
     return 0 if matched or not args.require_match else 1
 
 
@@ -324,6 +371,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--show-all", action="store_true",
         help="Also show below-threshold tracks, for threshold calibration.",
+    )
+    parser.add_argument(
+        "--record", action="store_true",
+        help="Write candidates to the database as PENDING decisions for review.",
+    )
+    parser.add_argument(
+        "--from-db", action="store_true",
+        help="Load the watchlist from the database rather than data/enrollment.",
+    )
+    parser.add_argument("--db-url", default=None, help="SQLAlchemy database URL.")
+    parser.add_argument(
+        "--camera-id", default="", help="Camera label stored with each decision.",
     )
     parser.add_argument(
         "--require-match", action="store_true",
