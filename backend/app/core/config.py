@@ -153,6 +153,32 @@ class GaitSettings(BaseModel):
     min_quality: float = Field(0.25, ge=0.0, le=1.0)
 
 
+class ReIDSettings(BaseModel):
+    """Phase 4: OSNet whole-body appearance re-identification."""
+
+    # OSNet variant. x1_0 is the accurate default (2.7M params, ~11MB weights);
+    # x0_25 is markedly faster if throughput matters.
+    model: str = "osnet_x1_0"
+    # OSNet's training input size. Do not change without retraining.
+    input_height: int = 256
+    input_width: int = 128
+
+    min_frames: int = 3
+    min_quality: float = Field(0.20, ge=0.0, le=1.0)
+
+    # Box height in pixels beyond which resolution stops limiting quality.
+    ideal_box_height: float = 192.0
+    # A standing person is roughly 2.5x taller than wide; boxes far from this
+    # usually mean a partial body or two people merged into one detection.
+    ideal_aspect: float = 2.5
+
+    # Days after which a stored re-ID reference is worth half its original
+    # weight. Re-ID largely encodes clothing, so it goes stale in a way face
+    # and gait do not -- a strong match weeks later probably means a similar
+    # jacket rather than the same person. Set to 0 to disable decay.
+    trust_half_life_days: float = 3.0
+
+
 class TrackBufferSettings(BaseModel):
     """Per-track frame buffering that feeds the embedding branches."""
 
@@ -178,6 +204,16 @@ class MatchingSettings(BaseModel):
     # Gait descriptors are far less discriminative than ArcFace, so this
     # threshold is necessarily higher and means much less on its own.
     gait_threshold: float = Field(0.80, ge=-1.0, le=1.0)
+    # Re-ID cosine similarities cluster in a high, narrow band, so face-like
+    # thresholds do not transfer. Measured on real crops: two different people
+    # scored 0.755, the same person across one track scored 0.980. A threshold
+    # of 0.75 would therefore have matched strangers. 0.88 sits between the
+    # two, leaning conservative because a false identification is worse than a
+    # missed one. Calibrate properly with the Phase-10 TAR@FAR curve -- the
+    # same-person figure here comes from one continuous track (identical
+    # clothing, lighting and seconds apart), which is far easier than a real
+    # cross-camera, cross-day match.
+    reid_threshold: float = Field(0.88, ge=-1.0, le=1.0)
     # Minimum observations before a track is matched at all, so an identity is
     # never asserted off a single frame.
     min_track_observations: int = 5
@@ -213,6 +249,7 @@ class Settings(BaseSettings):
     logging: LoggingSettings = LoggingSettings()
     face: FaceSettings = FaceSettings()
     gait: GaitSettings = GaitSettings()
+    reid: ReIDSettings = ReIDSettings()
     track_buffer: TrackBufferSettings = TrackBufferSettings()
     matching: MatchingSettings = MatchingSettings()
 

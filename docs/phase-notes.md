@@ -320,21 +320,116 @@ the project exists for — turned away, too distant, masked.
 
 ---
 
-## Phase 4 — re-ID branch (next)
+## Phase 4 — re-ID branch ✅
 
-OSNet via torchreid. The things to settle first, in order:
+**Delivered:** OSNet whole-body appearance embeddings, wired into enrollment
+and matching, with time-aware trust decay.
 
-1. Is `torchreid` installable on Windows + Python 3.10 + torch 2.5.1? Its PyPI
-   package lags the GitHub repo and may pin an incompatible torch.
-2. Do the OSNet pretrained weights still download? They historically came from
-   Google Drive via `gdown`, which breaks with quota errors; find a mirror if
-   so.
-3. If torchreid proves fragile, loading OSNet weights into a small vendored
-   model definition avoids a heavy dependency — but check the licence first,
-   which is exactly what caught out the gait branch.
+| File | Role |
+|---|---|
+| `app/embeddings/reid.py` | `ReIDEmbedder`, batched inference, `trust_at()` |
+| `app/embeddings/vendor/osnet.py` | OSNet model definition, vendored (MIT) |
 
-Re-ID is per-frame, so it subclasses `PerFrameBranch` like face and inherits
-the quality-weighted aggregation for free. Its quality score should account for
-occlusion and how much of the body is actually in frame. Phase 11's time-aware
-trust decay belongs here too: clothing is the modality that goes stale fastest,
-so a sighting weeks apart deserves far less weight than one from the same day.
+### The threshold that would have caused false matches
+
+I set `reid_threshold: 0.75` by analogy with the face threshold. Then measured
+it on real crops:
+
+| Comparison | Cosine |
+|---|---|
+| Same person (two halves of one track) | **0.980** |
+| Different people | **0.755** |
+
+The default sat *below* the different-people score. Re-ID similarities cluster
+in a high, narrow band — a 0.23 gap between same and different, against face's
+0.90 gap — so face thresholds simply do not transfer. Raised to **0.88**,
+leaning conservative because a false identification is worse than a missed one.
+
+Confirmed on the probe clip: the impostor track now falls through to re-ID and
+scores 0.771 against the enrolled subject, correctly rejected. At 0.75 it would
+have matched a stranger.
+
+The same-person figure comes from one continuous track — identical clothing,
+lighting, seconds apart — which is far easier than a real cross-camera match.
+Phase 10's TAR@FAR curve on real footage is what should actually set this.
+
+### Why OSNet is vendored rather than depended on
+
+`pip install torchreid` succeeds and it is **MIT licensed**, so there is no
+legal obstacle — unlike gait. The problem is purely structural: its package
+`__init__` imports the entire training stack to reach a model definition,
+pulling in `gdown` and then `tensorboard` as undeclared import-time
+dependencies, each failing in turn.
+
+`osnet.py` is 598 lines importing nothing beyond `torch`. Copying it (with the
+MIT licence and provenance in `vendor/README.md`) removes the whole fragile
+chain. The file is unmodified so it can be diffed against upstream. Weights are
+not vendored; they download on first use.
+
+Weight availability was verified before any of this was built: the Google Drive
+download still works, 10.9MB, 567 valid state-dict keys.
+
+### Decisions worth remembering
+
+**This is not the DeepSORT embedder.** DeepSORT already runs an appearance
+model to associate boxes between adjacent frames. That answers "is this the
+same blob as last frame"; OSNet answers "is this the person on the watchlist".
+Both get called re-ID, and conflating them is an easy mistake.
+
+**Re-ID goes stale, so trust decays.** Face and gait describe a person; re-ID
+largely describes their clothing. A match across two hours is strong evidence,
+the same score across two weeks probably means a common jacket. `trust_at()`
+applies exponential decay with a 3-day half-life. This is Phase 11's
+"time-aware trust" brought forward, because the alternative is a system that
+confidently misidentifies people by their coat.
+
+**Zero detection confidence is neutral, not disqualifying.** Tracker-predicted
+boxes report 0.0 confidence. Treating that as evidence of a bad crop would
+throw away usable frames, so it maps to 0.5.
+
+**Quality ignores pose, unlike face.** A back view is perfectly usable for
+re-ID — that is the point of the modality. It scores on resolution, box aspect
+ratio (a box far from human proportions means a partial or merged body), and
+detection confidence.
+
+### Verified on this machine
+
+- Weights download and load: 567 keys, 2.68M params, 512-d unit vectors.
+- Same person 0.980, different people 0.755, impostor correctly rejected at
+  the 0.88 threshold.
+- `embed_batch` agrees with per-frame results to 1e-3.
+- Trust decay: day 0 → 1.00, day 3 → 0.50, day 7 → 0.20, day 30 → 0.001.
+- Full suite: **116 passed**.
+
+### Known limits at this phase
+
+- **Cross-camera and cross-day re-ID is untested.** Every measurement here
+  comes from a single clip. Re-ID is precisely the modality that degrades
+  across cameras and days, so these numbers are its best case, not its typical
+  one.
+- The matching ladder (face → gait → re-ID) takes the strongest *available*
+  signal rather than combining them. That is the interim behaviour Phase 5
+  replaces with real fusion.
+- `trust_at()` exists and is tested but is not yet applied in matching — it has
+  nothing to weight until fusion lands in Phase 5.
+
+---
+
+## Phase 5 — baseline fusion (next)
+
+Simple rule-based and average fusion over the three modality embeddings,
+mirroring the "average fusion" row of the reference paper's Table I.
+Deliberately dumb: fixed weights, no learning. Its whole job is to be the
+number Phase 6's attention fusion has to beat, so it must be implemented
+honestly rather than hobbled.
+
+Two things it needs that already exist: `ModalityEmbedding.quality` per branch,
+and `trust_at()` for re-ID staleness. The obvious baselines to implement are
+equal-weight averaging, quality-weighted averaging, and max-confidence
+selection — reporting all three gives Phase 6 a real bar to clear.
+
+The per-modality similarity scales measured so far (face: 0.03 different /
+0.95 same; re-ID: 0.755 / 0.980) mean raw similarities **cannot** be averaged
+directly — they must be calibrated onto a comparable scale first, or re-ID will
+dominate every fused score purely by living in a higher numeric range. That is
+the main trap in this phase.

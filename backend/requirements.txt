@@ -76,10 +76,15 @@ cryptography>=42.0
 #   see docs/gait_setup.md (written in Phase 3)
 
 # ---------------------------------------------------------------------------
-# Phase 4 - re-ID branch (OSNet)
+# Phase 4 - re-ID branch (OSNet)  [ACTIVE]
 # ---------------------------------------------------------------------------
-# torchreid>=0.2.5
-# gdown>=5.2                   # pulls OSNet pretrained weights
+# torchreid is deliberately NOT a dependency. It is MIT licensed and installs
+# fine, but its package __init__ imports the whole training stack (datasets,
+# engines, TensorBoard) just to reach a model definition, pulling in undeclared
+# import-time dependencies. The OSNet model file imports nothing beyond torch,
+# so it is vendored under app/embeddings/vendor/ with its MIT licence instead.
+# Only the weight downloader is needed here.
+gdown>=5.1                       # fetches OSNet pretrained weights on first use
 
 # ---------------------------------------------------------------------------
 # Phase 7 - persistence

@@ -113,6 +113,26 @@ gait:
   min_silhouette_coverage: 0.12
   min_quality: 0.25
 
+# --- Phase 4: re-ID branch -------------------------------------------------
+reid:
+  # osnet_x1_0 is 2.7M params, ~11MB of weights, downloaded on first use.
+  # osnet_x0_25 is much faster if throughput matters more than accuracy.
+  model: osnet_x1_0
+  # OSNet's training input size. Changing this without retraining breaks it.
+  input_height: 256
+  input_width: 128
+  min_frames: 3
+  min_quality: 0.20
+  ideal_box_height: 192.0
+  # A standing person is ~2.5x taller than wide. Boxes far from this are
+  # usually a partial body or two people merged into one detection.
+  ideal_aspect: 2.5
+  # Re-ID mostly encodes clothing, so it goes stale in a way face and gait do
+  # not. After this many days a stored reference is worth half its weight; a
+  # strong match weeks later probably means a similar jacket, not the same
+  # person. Set to 0 to disable decay.
+  trust_half_life_days: 3.0
+
 track_buffer:
   # Bounded on purpose: unbounded per-track crop buffers exhaust memory on a
   # busy camera long before anything else breaks.
@@ -128,5 +148,9 @@ matching:
   # Gait is far less discriminative than face; this threshold is higher and
   # a gait-only match means much less. Fusion is what makes gait useful.
   gait_threshold: 0.80
+  # Re-ID similarities cluster high and narrow, so face thresholds do not
+  # transfer. Measured on real crops: different people 0.755, same person
+  # 0.980 -- a 0.75 threshold would have matched strangers.
+  reid_threshold: 0.88
   min_track_observations: 5
   rematch_every: 15

@@ -31,10 +31,27 @@ from app.core.track_buffer import TrackBufferStore  # noqa: E402
 from app.core.types import Modality  # noqa: E402
 from app.embeddings.face import FaceEmbedder  # noqa: E402
 from app.embeddings.gait import GaitEmbedder  # noqa: E402
+from app.embeddings.reid import ReIDEmbedder  # noqa: E402
 from app.matching.gallery import GalleryStore, MatchCandidate  # noqa: E402
 from app.pipeline import DetectionTrackingPipeline  # noqa: E402
 
 logger = get_logger(__name__)
+
+
+def THRESHOLDS_FOR(settings) -> dict[str, float]:
+    """Per-modality match thresholds.
+
+    Deliberately not one shared number. The three modalities produce
+    similarities on completely different scales: measured on real crops, two
+    different people scored 0.03 by face but 0.755 by re-ID. A single
+    threshold would either flood the report with false re-ID matches or
+    suppress every real face match.
+    """
+    return {
+        "face": settings.matching.face_threshold,
+        "gait": settings.matching.gait_threshold,
+        "reid": settings.matching.reid_threshold,
+    }
 
 
 @dataclass
@@ -145,15 +162,22 @@ def run(args: argparse.Namespace) -> int:
     store = TrackBufferStore(settings)
     face_embedder = FaceEmbedder(settings)
     gait_embedder = None if args.no_gait else GaitEmbedder(settings)
+    reid_embedder = None if args.no_reid else ReIDEmbedder(settings)
     verdicts: dict[int, TrackVerdict] = {}
 
+    thresholds = THRESHOLDS_FOR(settings)
+    print(f"Watchlist: {len(gallery)} enrolled.")
     print(
-        f"Watchlist: {len(gallery)} enrolled. Thresholds: face "
-        f"{settings.matching.face_threshold:.2f}, gait "
-        f"{settings.matching.gait_threshold:.2f}"
+        "Thresholds: "
+        + ", ".join(f"{name} {value:.2f}" for name, value in thresholds.items())
     )
-    if gait_embedder is None:
-        print("Gait fallback disabled (--no-gait).")
+    disabled = [
+        name
+        for name, embedder in (("gait", gait_embedder), ("reid", reid_embedder))
+        if embedder is None
+    ]
+    if disabled:
+        print("Disabled: " + ", ".join(disabled))
     print()
 
     for result, frame in pipeline.stream(args.source):
@@ -176,14 +200,26 @@ def run(args: argparse.Namespace) -> int:
             verdict = verdicts.setdefault(track_id, TrackVerdict(track_id=track_id))
             verdict.observations = len(buffer)
 
+            # Fall back through the modalities in order of how much each can
+            # be trusted: face, then gait, then appearance. Phases 5 and 6
+            # replace this ladder with real fusion that weighs all three at
+            # once; until then, taking the strongest available signal is the
+            # honest interim behaviour.
             probe = face_embedder.embed(observations)
             modality = Modality.FACE
+
             if not probe.has_signal and gait_embedder is not None:
                 # Face failed: turned away, too distant, masked. This is the
-                # exact case the project exists for, so fall back to gait
-                # rather than abandoning the track.
+                # exact case the project exists for.
                 probe = gait_embedder.embed(observations)
                 modality = Modality.GAIT
+
+            if not probe.has_signal and reid_embedder is not None:
+                # No face and not walking. Appearance is all that is left, and
+                # it is the weakest of the three -- see reid_threshold.
+                probe = reid_embedder.embed(observations)
+                modality = Modality.REID
+
             if not probe.has_signal:
                 continue
 
@@ -200,11 +236,7 @@ def run(args: argparse.Namespace) -> int:
                 verdict.probe_quality = probe.quality
                 verdict.modality = modality.value
 
-            active = (
-                settings.matching.face_threshold
-                if modality is Modality.FACE
-                else settings.matching.gait_threshold
-            )
+            active = THRESHOLDS_FOR(settings)[modality.value]
             if best.fused_similarity >= active:
                 verdict.times_matched += 1
                 verdict.hits.append(
@@ -224,14 +256,7 @@ def run(args: argparse.Namespace) -> int:
                     probe.quality,
                 )
 
-    matched = _report(
-        verdicts,
-        {
-            "face": settings.matching.face_threshold,
-            "gait": settings.matching.gait_threshold,
-        },
-        args.show_all,
-    )
+    matched = _report(verdicts, THRESHOLDS_FOR(settings), args.show_all)
     return 0 if matched or not args.require_match else 1
 
 
@@ -245,8 +270,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--max-frames", type=int, default=None)
     parser.add_argument(
-        "--no-gait", action="store_true",
-        help="Face only; skip the gait fallback.",
+        "--no-gait", action="store_true", help="Skip the gait fallback."
+    )
+    parser.add_argument(
+        "--no-reid", action="store_true", help="Skip the re-ID fallback."
     )
     parser.add_argument(
         "--show-all", action="store_true",

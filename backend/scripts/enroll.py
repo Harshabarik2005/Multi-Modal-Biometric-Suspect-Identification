@@ -34,6 +34,7 @@ from app.core.track_buffer import TrackBufferStore  # noqa: E402
 from app.core.types import Modality  # noqa: E402
 from app.embeddings.face import FaceEmbedder  # noqa: E402
 from app.embeddings.gait import GaitEmbedder  # noqa: E402
+from app.embeddings.reid import ReIDEmbedder  # noqa: E402
 from app.matching.gallery import GalleryStore, PersonRecord  # noqa: E402
 from app.pipeline import DetectionTrackingPipeline  # noqa: E402
 
@@ -122,6 +123,17 @@ def enroll(args: argparse.Namespace) -> int:
                 "        reference at all."
             )
 
+    if not args.no_reid:
+        reid = ReIDEmbedder(settings).embed_reference(observations)
+        if reid.has_signal:
+            print(
+                f"  reid: {reid.frames_used} body crops, quality "
+                f"{reid.quality:.3f}"
+            )
+            embeddings[Modality.REID] = reid
+        else:
+            print("  reid: no usable body crops (too small, or odd box shapes).")
+
     if not embeddings:
         print("\nNothing could be enrolled from this footage.")
         return 1
@@ -146,12 +158,21 @@ def enroll(args: argparse.Namespace) -> int:
     directory = store.save(person)
     print(f"\nSaved to {directory}")
     print("Stored modalities: " + ", ".join(sorted(m.value for m in embeddings)))
+    missing = [m.value for m in Modality if m not in embeddings]
+    if missing:
+        print("Not stored: " + ", ".join(missing))
     if Modality.GAIT not in embeddings:
         print(
-            "No gait reference stored -- this person will match on face alone "
-            "until you enroll them walking."
+            "  gait needs footage of the subject WALKING through several full "
+            "step cycles."
         )
-    print("Re-ID is not built yet (phase 4).")
+    if Modality.REID in embeddings:
+        print(
+            f"\nNote: the re-ID reference describes clothing as much as the "
+            f"person, so it decays with age (half-life "
+            f"{settings.reid.trust_half_life_days:g} days). Re-enroll if you "
+            "need it current."
+        )
     return 0
 
 
@@ -212,6 +233,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--no-gait", action="store_true",
         help="Skip the gait branch (faster; for rotation-on-the-spot clips).",
+    )
+    parser.add_argument(
+        "--no-reid", action="store_true", help="Skip the re-ID branch."
     )
     parser.add_argument("--list", action="store_true", help="List enrolled people.")
     parser.add_argument("--inspect", metavar="PERSON_ID", help="Show one record.")

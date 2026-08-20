@@ -14,9 +14,9 @@ Identification"* (2023, [arXiv:2303.13814](https://arxiv.org/abs/2303.13814)).
 The full spec, including where this project deliberately diverges from the
 paper, is in [faceless-frs-build-plan.md](faceless-frs-build-plan.md).
 
-> **Status: Phase 3 complete.** Detection, tracking, face and gait run end to
-> end: you can enroll a person from video and match them in other footage,
-> with gait as a fallback when no face is visible. Re-ID (phase 4) is next.
+> **Status: Phase 4 complete.** All three modalities work end to end — face,
+> gait and re-ID. Matching currently falls back through them in order;
+> real fusion is phases 5–6.
 
 ## Responsible use
 
@@ -99,7 +99,7 @@ Useful flags:
 The run ends with a report: frames processed, total person detections, and one
 row per track ID showing how many frames it survived.
 
-## Enroll and match (Phases 2-3)
+## Enroll and match (Phases 2-4)
 
 Generate smoke-test fixtures if you have no footage yet:
 
@@ -133,6 +133,17 @@ automatically; matches are printed as candidates for a human to confirm.
 excellent face reference and no gait reference at all — gait needs several full
 step cycles. Enroll from footage of the person walking if you want both, and
 `enroll.py --inspect <id>` will show which modalities were actually stored.
+
+**Each modality has its own threshold, and they are not interchangeable.**
+Measured on real crops, two different people score 0.03 by face but 0.755 by
+re-ID — re-ID similarities live in a much higher, narrower band. A single
+shared threshold would flood the report with false re-ID matches. Defaults:
+face 0.40, gait 0.80, re-ID 0.88, all to be calibrated properly against your
+own footage in Phase 10.
+
+**Re-ID references go stale.** Re-ID encodes clothing as much as the person, so
+its stored reference decays with a 3-day half-life (`reid.trust_half_life_days`).
+Re-enroll if you need it current.
 
 ### Encrypting stored templates
 
@@ -181,7 +192,8 @@ backend/
     core/          config, logging, shared types, video reader, track buffer
     detection/     YOLOv8 wrapper                        [Phase 1 ✓]
     tracking/      DeepSORT wrapper                      [Phase 1 ✓]
-    embeddings/    face.py, gait.py, silhouette.py [Phases 2-3 ✓] / reid.py [Phase 4]
+    embeddings/    face.py, gait.py, silhouette.py, reid.py  [Phases 2-4 ✓]
+      vendor/      OSNet model definition, vendored (MIT)
     matching/      watchlist gallery + open-set ranking  [Phase 2 ✓]
     fusion/        baseline.py / attention.py            [Phases 5-6]
     api/           FastAPI routes                        [Phase 7]
@@ -199,17 +211,22 @@ data/
 docs/
 ```
 
-Modules for phases 4+ exist as documented placeholders that raise
+Modules for phases 5+ exist as documented placeholders that raise
 `NotImplementedError` — the layout is in place, the code is not.
 
-## Next: Phase 4
+## Next: Phase 5
 
-Re-ID branch (OSNet). See [docs/phase-notes.md](docs/phase-notes.md) for what
-needs settling first — chiefly whether `torchreid` installs cleanly and whether
-its pretrained weights still download.
+Baseline fusion — fixed-weight averaging over the three modalities, to give
+Phase 6's attention fusion a number to beat.
 
-A note on gait: the default encoder is a **classical GEI descriptor, not a
-learned embedding**, because OpenGait ships no licence file and its weights are
-unusable without vendoring its model code. Gait is therefore a genuinely weaker
-signal than face here, and is expected to earn a low attention weight in
-Phase 6 — that is the correct outcome rather than a bug.
+The main trap, already measured: the three modalities produce similarities on
+completely different scales (face 0.03/0.95 for different/same, re-ID
+0.755/0.980). They cannot be averaged raw or re-ID will dominate every fused
+score purely by living in a higher numeric range.
+
+Two standing caveats on modality strength. Gait uses a **classical GEI
+descriptor, not a learned embedding**, because OpenGait ships no licence file
+and its weights are unusable without vendoring its model code. Re-ID is
+strongest within a single camera and day and degrades across both. Both should
+earn lower attention weights than face in Phase 6 — the correct outcome rather
+than a bug.
