@@ -79,6 +79,40 @@ face:
   enroll_top_fraction: 0.4
   enroll_min_frames: 10
 
+# --- Phase 3: gait branch --------------------------------------------------
+gait:
+  seg_model: yolov8n-seg.pt
+  seg_conf: 0.30
+  # 64x44 is the standard gait silhouette canvas used by GaitSet/GaitGL/
+  # GaitBase. Keeping that shape means a learned encoder can be swapped in
+  # later without redoing any preprocessing.
+  silhouette_height: 64
+  silhouette_width: 44
+  # One gait cycle is ~20-30 frames at 25fps. Below min_frames the branch
+  # reports no signal rather than guessing from half a step.
+  min_frames: 20
+  # At 25fps a half gait cycle is ~10-15 frames. Short lags are where
+  # segmentation jitter fakes periodicity, so the floor is deliberately high.
+  min_half_period: 7
+  max_half_period: 40
+  # A stationary person filmed by a panning camera still produces weak
+  # periodicity from mask jitter (measured 0.18-0.32 on such footage). These
+  # two gates are what stop that being reported as a walk.
+  min_periodicity: 0.55
+  min_swing_ratio: 0.12
+  # A body does not change size while walking. Big swings in silhouette area
+  # mean the segmenter is failing, not that someone is walking.
+  # Measured: real walking 0.033-0.045, unstable segmentation 0.159.
+  max_area_cv: 0.10
+  # "gei" is a classical descriptor needing no trained weights. "opengait"
+  # would use a learned encoder - see docs/phase-notes.md for why that is not
+  # the default.
+  encoder: gei
+  descriptor_height: 32
+  descriptor_width: 22
+  min_silhouette_coverage: 0.12
+  min_quality: 0.25
+
 track_buffer:
   # Bounded on purpose: unbounded per-track crop buffers exhaust memory on a
   # busy camera long before anything else breaks.
@@ -91,5 +125,8 @@ matching:
   # Starting point only. Calibrate against your own footage with the Phase-10
   # TAR@FAR curve before trusting any number here.
   face_threshold: 0.40
+  # Gait is far less discriminative than face; this threshold is higher and
+  # a gait-only match means much less. Fusion is what makes gait useful.
+  gait_threshold: 0.80
   min_track_observations: 5
   rematch_every: 15

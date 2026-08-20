@@ -208,22 +208,133 @@ Full suite: 64 passed (60 fast + 4 slow).
 
 ---
 
-## Phase 3 — gait branch (next)
+## Phase 3 — gait branch ✅
 
-**Unresolved risk, and it should be settled before writing code:** the plan
-assumes pretraining on CASIA-B, but that dataset requires a signed agreement
-and its distribution has reportedly been unreliable. Whether OpenGait's
-published GaitSet/GaitGL checkpoints are redistributable independently of the
-dataset licence is the question to answer first. If pretrained gait weights
-turn out not to be practically obtainable, the honest fallbacks are:
+**Delivered:** silhouette extraction, gait cycle detection, Gait Energy Images,
+and a pluggable encoder, wired into enrollment and matching as a fallback for
+when the face branch has nothing.
 
-- Gait Energy Images plus a small encoder trained on your own footage.
-- Skeleton-based gait from YOLOv8-pose keypoints, which may in any case be more
-  robust than silhouettes at CCTV resolution.
-- Treating gait as a low-weight modality initially and letting the attention
-  head learn to discount it.
+| File | Role |
+|---|---|
+| `app/embeddings/silhouette.py` | YOLOv8-seg → normalised 64×44 silhouettes |
+| `app/embeddings/gait.py` | cadence detection, GEI, `GaitEmbedder` |
 
-Whichever path, the branch implements `EmbeddingBranch.embed()` directly over a
-sequence and returns clean "no signal" when it has fewer frames than one gait
-cycle. Silhouettes can come from YOLOv8-seg (ultralytics is already installed)
-or, for a fixed camera, classical background subtraction.
+### The licence finding, and what it forced
+
+The plan called for GaitSet/GaitGL pretrained on CASIA-B. Checked directly:
+
+- CASIA-B **pretrained weights are downloadable** from OpenGait's GitHub
+  releases (`pretrained_casiab_gaitbase.zip`, 54MB, HTTP 200). No dataset
+  agreement is needed for the weights themselves.
+- But **OpenGait ships no LICENSE file at all** — verified against the repo
+  root and the GitHub licence API, both empty. With no licence declared, the
+  code is all-rights-reserved by default, and the weights are useless without
+  vendoring its model definitions.
+
+So the default encoder is a **classical GEI descriptor, not a learned
+embedding**: pooled GEI plus row/column projection profiles, L2 normalised.
+GEI-based recognition genuinely works and predates deep gait models, but it is
+markedly weaker than a trained encoder and much weaker than ArcFace. Stated
+plainly rather than buried, because a modality that over-claims its own
+reliability corrupts the Phase-6 attention weights that decide how far to
+trust it.
+
+Preprocessing deliberately produces exactly the 64×44 input a learned gait
+model expects, so swapping one in later is an encoder change and nothing else.
+
+### The bug that mattered: gait reported for people standing still
+
+First run against real footage, 3 of 4 tracks produced confident gait
+embeddings — one at quality 0.66. **Nobody in that clip is walking**; it is a
+panned photograph. The "gait" was segmentation jitter, and autocorrelation
+latched onto it happily.
+
+That is the most dangerous possible failure for this branch. A false gait
+signal is not a missed detection — it is fabricated evidence that fusion would
+weight as real. Three independent gates now stand between a signal and a gait
+embedding, because each is individually foolable:
+
+| Gate | Catches | Foolable alone by |
+|---|---|---|
+| **Periodicity** ≥ 0.55 | signals that do not repeat | a low-amplitude repeating wobble |
+| **Swing ratio** ≥ 0.12 | legs that barely move | one big lurch |
+| **Area stability** ≤ 0.10 | segmentation failure | — |
+
+The third is the one that actually settled it, and it rests on a physical
+invariant rather than a tuned number: **a human body does not change size while
+walking**. Legs redistribute silhouette pixels, they do not add or remove them.
+Measured coefficient of variation in silhouette area:
+
+- real walking: **0.033–0.045** across every stride and cadence tested
+- the false-positive track: **0.159**
+
+Threshold 0.10 sits with roughly 2× headroom on both sides. Result on the
+stationary-people clip: **0 of 9 tracks** report gait, down from 3 of 4, while
+every synthetic walker still passes all three gates.
+
+`min_half_period` also went from 5 to 7 frames — at 25fps a half gait cycle is
+10–15 frames, and short lags are precisely where jitter manufactures fake
+periodicity.
+
+### Other decisions worth remembering
+
+**Silhouettes are centred on centre of mass, not bounding box.** An
+outstretched arm or a swinging bag shifts the box but barely moves the mass.
+Centring on the box makes the whole body jitter sideways frame to frame —
+which is exactly the signal gait recognition is trying to read.
+
+**The GEI is truncated to whole gait cycles.** Averaged over a partial cycle it
+is biased toward whichever leg happened to be forward when the clip ended, so
+the same person recorded twice would not match themselves. Tested directly: 40
+frames and 47 frames of the same walk produce GEIs identical to 1e-6.
+
+**Gait has its own match threshold (0.80 vs face's 0.40).** A gait score of
+0.85 is a far weaker claim than a face score of 0.85; one shared number would
+quietly equate them. The match report also prints which modality produced each
+score, so a gait-driven match can never be read as a face-driven one.
+
+**Matching falls back to gait only when face has no signal.** That is the case
+the project exists for — turned away, too distant, masked.
+
+### Verified on this machine
+
+- 0 of 9 stationary tracks report gait (was 3 of 4 before the gates).
+- Synthetic walkers pass at strides 0.4–1.8 and cadences 7–14 frames.
+- Cadence recovered exactly for known periods of 7, 10 and 14 frames.
+- Face matching unchanged: enrolled subject +0.953 `via face`.
+- Full suite: **95 passed** (89 fast + 6 slow).
+
+### Known limits at this phase
+
+- **No positive validation on real walking footage.** The negative direction is
+  tested against real video; the positive direction rests on synthetic
+  silhouettes. Nothing here has seen an actual person walk. That is the single
+  biggest gap in the gait branch and only real footage closes it.
+- The classical descriptor is weak compared to a learned encoder. Expect gait
+  to earn a low attention weight in Phase 6 — which is the correct outcome, not
+  a failure.
+- Segmentation runs per buffered crop, so gait costs a second model pass. Fine
+  at current volumes; batching would help if throughput becomes a problem.
+- `area_stability` assumes the tracker keeps a consistent box. Heavy occlusion
+  will trip it, correctly reporting no gait rather than a corrupted one.
+
+---
+
+## Phase 4 — re-ID branch (next)
+
+OSNet via torchreid. The things to settle first, in order:
+
+1. Is `torchreid` installable on Windows + Python 3.10 + torch 2.5.1? Its PyPI
+   package lags the GitHub repo and may pin an incompatible torch.
+2. Do the OSNet pretrained weights still download? They historically came from
+   Google Drive via `gdown`, which breaks with quota errors; find a mirror if
+   so.
+3. If torchreid proves fragile, loading OSNet weights into a small vendored
+   model definition avoids a heavy dependency — but check the licence first,
+   which is exactly what caught out the gait branch.
+
+Re-ID is per-frame, so it subclasses `PerFrameBranch` like face and inherits
+the quality-weighted aggregation for free. Its quality score should account for
+occlusion and how much of the body is actually in frame. Phase 11's time-aware
+trust decay belongs here too: clothing is the modality that goes stale fastest,
+so a sighting weeks apart deserves far less weight than one from the same day.

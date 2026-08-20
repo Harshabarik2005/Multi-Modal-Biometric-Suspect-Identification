@@ -14,9 +14,9 @@ Identification"* (2023, [arXiv:2303.13814](https://arxiv.org/abs/2303.13814)).
 The full spec, including where this project deliberately diverges from the
 paper, is in [faceless-frs-build-plan.md](faceless-frs-build-plan.md).
 
-> **Status: Phase 2 complete.** Detection, tracking, and the face branch run
-> end to end: you can enroll a person from video and match them in other
-> footage. Gait and re-ID (phases 3–4) are not wired in yet.
+> **Status: Phase 3 complete.** Detection, tracking, face and gait run end to
+> end: you can enroll a person from video and match them in other footage,
+> with gait as a fallback when no face is visible. Re-ID (phase 4) is next.
 
 ## Responsible use
 
@@ -99,7 +99,7 @@ Useful flags:
 The run ends with a report: frames processed, total person detections, and one
 row per track ID showing how many frames it survived.
 
-## Enroll and match (Phase 2)
+## Enroll and match (Phases 2-3)
 
 Generate smoke-test fixtures if you have no footage yet:
 
@@ -124,8 +124,15 @@ cd backend && python scripts/match.py --source ../data/test_videos/probe_two_sub
 ```
 
 `--show-all` also prints below-threshold tracks, which is what you need when
-calibrating the threshold. Nothing is acted on automatically — matches are
-printed as candidates for a human to confirm.
+calibrating the threshold. The report names the modality behind each score
+(`via face` / `via gait`), and the two have separate thresholds — a gait score
+of 0.85 is a much weaker claim than a face score of 0.85. Nothing is acted on
+automatically; matches are printed as candidates for a human to confirm.
+
+**Enrolling gait needs walking footage.** A 360° rotation on the spot gives an
+excellent face reference and no gait reference at all — gait needs several full
+step cycles. Enroll from footage of the person walking if you want both, and
+`enroll.py --inspect <id>` will show which modalities were actually stored.
 
 ### Encrypting stored templates
 
@@ -174,7 +181,7 @@ backend/
     core/          config, logging, shared types, video reader, track buffer
     detection/     YOLOv8 wrapper                        [Phase 1 ✓]
     tracking/      DeepSORT wrapper                      [Phase 1 ✓]
-    embeddings/    face.py [Phase 2 ✓] / gait.py, reid.py [Phases 3-4]
+    embeddings/    face.py, gait.py, silhouette.py [Phases 2-3 ✓] / reid.py [Phase 4]
     matching/      watchlist gallery + open-set ranking  [Phase 2 ✓]
     fusion/        baseline.py / attention.py            [Phases 5-6]
     api/           FastAPI routes                        [Phase 7]
@@ -192,13 +199,17 @@ data/
 docs/
 ```
 
-Modules for phases 3+ exist as documented placeholders that raise
+Modules for phases 4+ exist as documented placeholders that raise
 `NotImplementedError` — the layout is in place, the code is not.
 
-## Next: Phase 3
+## Next: Phase 4
 
-Gait branch. One risk to settle before writing code: the plan assumes
-pretraining on CASIA-B, which is licence-gated and has been unreliable to
-obtain. Whether OpenGait's published checkpoints are usable independently of
-that dataset licence decides the approach. See
-[docs/phase-notes.md](docs/phase-notes.md) for the fallbacks.
+Re-ID branch (OSNet). See [docs/phase-notes.md](docs/phase-notes.md) for what
+needs settling first — chiefly whether `torchreid` installs cleanly and whether
+its pretrained weights still download.
+
+A note on gait: the default encoder is a **classical GEI descriptor, not a
+learned embedding**, because OpenGait ships no licence file and its weights are
+unusable without vendoring its model code. Gait is therefore a genuinely weaker
+signal than face here, and is expected to earn a low attention weight in
+Phase 6 — that is the correct outcome rather than a bug.

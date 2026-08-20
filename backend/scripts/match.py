@@ -30,6 +30,7 @@ from app.core.logging import get_logger, setup_logging  # noqa: E402
 from app.core.track_buffer import TrackBufferStore  # noqa: E402
 from app.core.types import Modality  # noqa: E402
 from app.embeddings.face import FaceEmbedder  # noqa: E402
+from app.embeddings.gait import GaitEmbedder  # noqa: E402
 from app.matching.gallery import GalleryStore, MatchCandidate  # noqa: E402
 from app.pipeline import DetectionTrackingPipeline  # noqa: E402
 
@@ -48,29 +49,38 @@ class TrackVerdict:
     probe_quality: float = 0.0
     observations: int = 0
     times_matched: int = 0
+    # Which modality produced the best score. Surfaced so the report never
+    # implies a gait match carries the same weight as a face match.
+    modality: str = "-"
     # Every above-threshold hit, for the audit log section 8 requires.
     hits: list[tuple[int, str, float]] = field(default_factory=list)
 
 
 def _report(
-    verdicts: dict[int, TrackVerdict], threshold: float, show_all: bool
+    verdicts: dict[int, TrackVerdict],
+    thresholds: dict[str, float],
+    show_all: bool,
 ) -> int:
     print()
     print("=" * 74)
     print("MATCH REPORT")
     print("=" * 74)
 
+    # Each modality carries its own threshold: a gait score of 0.85 is a far
+    # weaker claim than a face score of 0.85, and one shared number would
+    # quietly equate them.
     matched = {
         tid: v
         for tid, v in verdicts.items()
-        if v.best_person_id and v.best_similarity >= threshold
+        if v.best_person_id
+        and v.best_similarity >= thresholds.get(v.modality, 1.1)
     }
     unmatched = {tid: v for tid, v in verdicts.items() if tid not in matched}
 
     if matched:
         print(f"\nCANDIDATE MATCHES ({len(matched)}) -- require human confirmation\n")
         header = (
-            f"  {'track':>5}  {'person':<20} {'name':<22} "
+            f"  {'track':>5}  {'person':<20} {'name':<20} {'via':>5} "
             f"{'sim':>6}  {'qual':>5}  {'frame':>6}  {'hits':>4}"
         )
         print(header)
@@ -79,7 +89,7 @@ def _report(
         ):
             print(
                 f"  {verdict.track_id:>5}  {verdict.best_person_id:<20} "
-                f"{(verdict.best_person_name or ''):<22} "
+                f"{(verdict.best_person_name or ''):<20} {verdict.modality:>5} "
                 f"{verdict.best_similarity:>6.3f}  {verdict.probe_quality:>5.2f}  "
                 f"{verdict.best_frame:>6}  {verdict.times_matched:>4}"
             )
@@ -92,7 +102,7 @@ def _report(
             unmatched.values(), key=lambda v: v.best_similarity, reverse=True
         ):
             if verdict.best_person_id is None:
-                detail = "no face embedded"
+                detail = "no modality produced an embedding"
             else:
                 detail = (
                     f"closest {verdict.best_person_id} at {verdict.best_similarity:+.3f}"
@@ -128,16 +138,23 @@ def run(args: argparse.Namespace) -> int:
         )
         return 1
 
-    threshold = settings.matching.face_threshold
     min_obs = settings.matching.min_track_observations
     rematch_every = settings.matching.rematch_every
 
-    print(f"Watchlist: {len(gallery)} enrolled. Face threshold: {threshold:.2f}\n")
-
     pipeline = DetectionTrackingPipeline(settings)
     store = TrackBufferStore(settings)
-    embedder = FaceEmbedder(settings)
+    face_embedder = FaceEmbedder(settings)
+    gait_embedder = None if args.no_gait else GaitEmbedder(settings)
     verdicts: dict[int, TrackVerdict] = {}
+
+    print(
+        f"Watchlist: {len(gallery)} enrolled. Thresholds: face "
+        f"{settings.matching.face_threshold:.2f}, gait "
+        f"{settings.matching.gait_threshold:.2f}"
+    )
+    if gait_embedder is None:
+        print("Gait fallback disabled (--no-gait).")
+    print()
 
     for result, frame in pipeline.stream(args.source):
         updated = store.update(result, frame)
@@ -155,15 +172,22 @@ def run(args: argparse.Namespace) -> int:
                 continue
             buffer.last_matched_frame = result.frame_index
 
-            probe = embedder.embed(list(buffer))
+            observations = list(buffer)
             verdict = verdicts.setdefault(track_id, TrackVerdict(track_id=track_id))
             verdict.observations = len(buffer)
+
+            probe = face_embedder.embed(observations)
+            modality = Modality.FACE
+            if not probe.has_signal and gait_embedder is not None:
+                # Face failed: turned away, too distant, masked. This is the
+                # exact case the project exists for, so fall back to gait
+                # rather than abandoning the track.
+                probe = gait_embedder.embed(observations)
+                modality = Modality.GAIT
             if not probe.has_signal:
                 continue
 
-            candidates: list[MatchCandidate] = gallery.rank_single(
-                Modality.FACE, probe
-            )
+            candidates: list[MatchCandidate] = gallery.rank_single(modality, probe)
             if not candidates:
                 continue
             best = candidates[0]
@@ -174,8 +198,14 @@ def run(args: argparse.Namespace) -> int:
                 verdict.best_person_name = best.person.display_name
                 verdict.best_frame = result.frame_index
                 verdict.probe_quality = probe.quality
+                verdict.modality = modality.value
 
-            if best.fused_similarity >= threshold:
+            active = (
+                settings.matching.face_threshold
+                if modality is Modality.FACE
+                else settings.matching.gait_threshold
+            )
+            if best.fused_similarity >= active:
                 verdict.times_matched += 1
                 verdict.hits.append(
                     (
@@ -194,7 +224,14 @@ def run(args: argparse.Namespace) -> int:
                     probe.quality,
                 )
 
-    matched = _report(verdicts, threshold, args.show_all)
+    matched = _report(
+        verdicts,
+        {
+            "face": settings.matching.face_threshold,
+            "gait": settings.matching.gait_threshold,
+        },
+        args.show_all,
+    )
     return 0 if matched or not args.require_match else 1
 
 
@@ -207,6 +244,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Cosine similarity above which a track counts as a candidate.",
     )
     parser.add_argument("--max-frames", type=int, default=None)
+    parser.add_argument(
+        "--no-gait", action="store_true",
+        help="Face only; skip the gait fallback.",
+    )
     parser.add_argument(
         "--show-all", action="store_true",
         help="Also show below-threshold tracks, for threshold calibration.",

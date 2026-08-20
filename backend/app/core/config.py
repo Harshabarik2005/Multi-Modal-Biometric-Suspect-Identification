@@ -101,6 +101,58 @@ class FaceSettings(BaseModel):
     enroll_min_frames: int = 10
 
 
+class GaitSettings(BaseModel):
+    """Phase 3: gait branch -- silhouettes, gait cycles, GEI."""
+
+    # YOLOv8 segmentation model used to cut silhouettes out of body crops.
+    seg_model: str = "yolov8n-seg.pt"
+    seg_conf: float = Field(0.30, ge=0.0, le=1.0)
+
+    # Standard gait silhouette canvas (GaitSet / GaitGL / GaitBase all use
+    # 64x44). Keeping this shape means a learned encoder can be dropped in
+    # later without redoing the preprocessing.
+    silhouette_height: int = 64
+    silhouette_width: int = 44
+
+    # A gait cycle is roughly 20-30 frames at 25fps. Below `min_frames` there
+    # is not enough signal and the branch reports nothing rather than guessing.
+    min_frames: int = 20
+    # Plausible half-cycle period in frames, used to bound the autocorrelation
+    # search. At 25fps a half gait cycle is ~10-15 frames; below 7 you are into
+    # sprinting territory, and short lags are exactly where segmentation jitter
+    # produces fake periodicity.
+    min_half_period: int = 7
+    max_half_period: int = 40
+
+    # Autocorrelation strength below which the signal is not a walk. Panning
+    # over a stationary person produces weak periodicity from mask jitter --
+    # measured around 0.18-0.32 on such footage, so this sits well above it.
+    min_periodicity: float = Field(0.55, ge=0.0, le=1.0)
+    # The leg-region width of a real walk swings substantially. Noise wobbles.
+    # Relative swing = (p90 - p10) / mean of the cadence signal.
+    min_swing_ratio: float = Field(0.12, ge=0.0)
+    # A human body does not change size while walking. Large frame-to-frame
+    # variation in silhouette area means the segmenter is gaining and losing
+    # chunks of the person, and its "periodicity" is segmentation noise rather
+    # than gait. Measured: real walking 0.033-0.045, unstable segmentation
+    # 0.159, so this sits with headroom on both sides.
+    max_area_cv: float = Field(0.10, ge=0.0)
+
+    # Encoder producing the final vector from a GEI.
+    #   "gei"  - classical descriptor, no trained weights required
+    #   "opengait" - learned encoder; needs OpenGait model code, see docs
+    encoder: str = "gei"
+    # Side length the GEI is pooled to before flattening, for the classical
+    # descriptor. 32x22 keeps spatial structure without a huge vector.
+    descriptor_height: int = 32
+    descriptor_width: int = 22
+
+    # Below this the silhouette is too poor to use (mask barely covers the box,
+    # or the person is clipped by the frame edge).
+    min_silhouette_coverage: float = Field(0.12, ge=0.0, le=1.0)
+    min_quality: float = Field(0.25, ge=0.0, le=1.0)
+
+
 class TrackBufferSettings(BaseModel):
     """Per-track frame buffering that feeds the embedding branches."""
 
@@ -123,6 +175,9 @@ class MatchingSettings(BaseModel):
     # Calibrate on real footage via the Phase-10 TAR@FAR curve rather than
     # trusting this default.
     face_threshold: float = Field(0.40, ge=-1.0, le=1.0)
+    # Gait descriptors are far less discriminative than ArcFace, so this
+    # threshold is necessarily higher and means much less on its own.
+    gait_threshold: float = Field(0.80, ge=-1.0, le=1.0)
     # Minimum observations before a track is matched at all, so an identity is
     # never asserted off a single frame.
     min_track_observations: int = 5
@@ -157,6 +212,7 @@ class Settings(BaseSettings):
     video: VideoSettings = VideoSettings()
     logging: LoggingSettings = LoggingSettings()
     face: FaceSettings = FaceSettings()
+    gait: GaitSettings = GaitSettings()
     track_buffer: TrackBufferSettings = TrackBufferSettings()
     matching: MatchingSettings = MatchingSettings()
 

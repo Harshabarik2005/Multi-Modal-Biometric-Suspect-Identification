@@ -33,6 +33,7 @@ from app.core.logging import setup_logging  # noqa: E402
 from app.core.track_buffer import TrackBufferStore  # noqa: E402
 from app.core.types import Modality  # noqa: E402
 from app.embeddings.face import FaceEmbedder  # noqa: E402
+from app.embeddings.gait import GaitEmbedder  # noqa: E402
 from app.matching.gallery import GalleryStore, PersonRecord  # noqa: E402
 from app.pipeline import DetectionTrackingPipeline  # noqa: E402
 
@@ -84,30 +85,51 @@ def enroll(args: argparse.Namespace) -> int:
         )
 
     print(f"\nEmbedding {len(observations)} frames from track #{track_id}...")
-    embedder = FaceEmbedder(settings)
-    face = embedder.embed_reference(observations)
+    embeddings = {}
 
-    if not face.has_signal:
+    face = FaceEmbedder(settings).embed_reference(observations)
+    if face.has_signal:
+        candidates = face.detail.get("enroll_candidates", 0)
+        selected = face.detail.get("enroll_selected", 0)
         print(
-            "\nNo usable face was found in any frame.\n"
-            "  - Is the subject's face visible and reasonably frontal?\n"
-            "  - Is the video high enough resolution? Faces need ~112px height.\n"
-            f"  - Try lowering face.min_quality (currently {settings.face.min_quality})."
+            f"  face: {int(selected)} of {int(candidates)} usable frames kept "
+            f"(top {settings.face.enroll_top_fraction:.0%} by quality), "
+            f"quality {face.quality:.3f}"
         )
-        return 1
+        embeddings[Modality.FACE] = face
+    else:
+        print(
+            "  face: no usable face found.\n"
+            "        - Is the subject's face visible and reasonably frontal?\n"
+            "        - Faces need roughly 112px of height to embed well.\n"
+            f"        - Try lowering face.min_quality (now {settings.face.min_quality})."
+        )
 
-    candidates = face.detail.get("enroll_candidates", 0)
-    selected = face.detail.get("enroll_selected", 0)
-    print(
-        f"Face reference built: {int(selected)} of {int(candidates)} usable frames "
-        f"kept (top {settings.face.enroll_top_fraction:.0%} by quality), "
-        f"quality {face.quality:.3f}"
-    )
+    if not args.no_gait:
+        gait = GaitEmbedder(settings).embed_reference(observations)
+        if gait.has_signal:
+            print(
+                f"  gait: {gait.frames_used} silhouettes, "
+                f"{gait.detail.get('cycles', 0):.1f} gait cycles, "
+                f"quality {gait.quality:.3f}"
+            )
+            embeddings[Modality.GAIT] = gait
+        else:
+            print(
+                "  gait: no gait signal. The subject has to be WALKING through\n"
+                "        several full step cycles. A 360-degree rotation on the\n"
+                "        spot gives an excellent face reference and no gait\n"
+                "        reference at all."
+            )
+
+    if not embeddings:
+        print("\nNothing could be enrolled from this footage.")
+        return 1
 
     person = PersonRecord(
         person_id=args.person_id,
         display_name=args.name or args.person_id,
-        embeddings={Modality.FACE: face},
+        embeddings=embeddings,
         enrolled_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         notes=args.notes or "",
         source=str(args.source),
@@ -123,10 +145,13 @@ def enroll(args: argparse.Namespace) -> int:
 
     directory = store.save(person)
     print(f"\nSaved to {directory}")
-    print(
-        "\nGait and re-ID references are not built yet (phases 3 and 4). This "
-        "person will match on face alone until those land."
-    )
+    print("Stored modalities: " + ", ".join(sorted(m.value for m in embeddings)))
+    if Modality.GAIT not in embeddings:
+        print(
+            "No gait reference stored -- this person will match on face alone "
+            "until you enroll them walking."
+        )
+    print("Re-ID is not built yet (phase 4).")
     return 0
 
 
@@ -183,6 +208,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--config", default=None, help="Path to a config YAML.")
     parser.add_argument(
         "--force", action="store_true", help="Replace an existing enrollment."
+    )
+    parser.add_argument(
+        "--no-gait", action="store_true",
+        help="Skip the gait branch (faster; for rotation-on-the-spot clips).",
     )
     parser.add_argument("--list", action="store_true", help="List enrolled people.")
     parser.add_argument("--inspect", metavar="PERSON_ID", help="Show one record.")
