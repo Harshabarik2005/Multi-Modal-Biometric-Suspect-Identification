@@ -278,6 +278,41 @@ or templates are written unencrypted and every write logs a warning saying so.
 The database file is git-ignored — it holds biometric templates and the whole
 audit trail.
 
+## Enrol and search from the browser
+
+Run the API and the dashboard together:
+
+```bash
+cd backend && python scripts/serve.py
+```
+```bash
+cd frontend && npm install && npm run dev
+```
+
+Open `http://localhost:5173`.
+
+**Enrol someone** — upload photos or video, or record straight from the webcam.
+"Check what this covers" runs detection only and takes seconds; it tells you
+which of the three signals your files can actually support before you commit.
+
+That check matters more than it sounds. Photos enrol a face and an appearance
+profile but **no gait profile at all** — a still image contains no gait
+information — and nothing in the resulting numbers would tell you.
+
+| Signal | Accepts | Needs |
+|---|---|---|
+| Face | photos or video | face visible, roughly front-on, enough pixels |
+| Gait | **video only, of them walking** | ~2s+ of walking, whole body, side-on best |
+| Appearance | photos or video | whole body in frame |
+
+**Search footage** — upload CCTV and it detects, tracks and compares everyone
+against the watchlist, then reports who it found, when in the clip, and what
+drove each result. Everything found is queued for review; nothing is confirmed
+automatically.
+
+Both run in the background with a progress bar, because a scan runs three
+recognition models over every frame — roughly a minute per thousand frames.
+
 ## The review console (Phase 8)
 
 Run the API and the dashboard together:

@@ -15,7 +15,8 @@ from sqlalchemy.engine import Engine
 from app.core.config import Settings, get_settings
 from app.core.logging import get_logger, setup_logging
 from app.db.repository import create_schema, make_engine, session_factory
-from app.api import routes
+from app.api import ingest, routes
+from app.api.jobs import JobRunner
 
 logger = get_logger(__name__)
 
@@ -32,7 +33,24 @@ Every decision records the per-modality weights that produced it, so a reviewer
 can see whether a match rested on a clear face or mostly on a jacket.
 
 Biometric templates are encrypted at rest and are never returned over this API.
+
+Uploading
+---------
+`POST /api/enroll` takes photos and/or video of one person; `POST /api/scan`
+takes CCTV footage and searches it. Both run in the background and return a job
+id -- poll `GET /api/jobs/{id}`. Uploaded files are deleted as soon as the job
+finishes, because enrolment footage is personal data and keeping it after the
+embeddings are extracted creates a second copy to protect for no benefit.
+
+`POST /api/enroll/preview` runs detection only and reports which of the three
+signals an upload can actually support. Worth calling first: a photograph
+contains no gait information at all, so a photos-only enrolment silently
+produces a profile that can never match on how someone walks.
 """
+
+#: Set by `create_app` so background jobs can open their own database session.
+#: Jobs outlive the request that started them, so they cannot borrow its.
+session_maker_for_app = None
 
 
 def create_app(settings: Settings | None = None, engine: Engine | None = None) -> FastAPI:
@@ -50,16 +68,26 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None) -
     create_schema(engine)
     make_session = session_factory(engine)
 
+    global session_maker_for_app
+    session_maker_for_app = make_session
+
+    runner = JobRunner(
+        # One worker on purpose: the models contend for the same GPU memory,
+        # so two concurrent scans make both slower and risk running out.
+        max_workers=getattr(settings, "job_workers", 1)
+    )
+
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         logger.info("%s API starting", settings.project_name)
         yield
+        runner.shutdown()
         engine.dispose()
 
     app = FastAPI(
         title=f"{settings.project_name} API",
         description=DESCRIPTION,
-        version="0.7.0",
+        version="0.9.0",
         lifespan=lifespan,
     )
 
@@ -71,7 +99,13 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None) -
             session.close()
 
     app.dependency_overrides[routes.get_session] = get_session
+    app.dependency_overrides[ingest.get_session] = get_session
+    app.dependency_overrides[ingest.get_runner] = lambda: runner
+    app.dependency_overrides[ingest.get_app_settings] = lambda: settings
+
     app.include_router(routes.router, prefix="/api")
+    app.include_router(ingest.router, prefix="/api")
+    app.state.job_runner = runner
     return app
 
 

@@ -1010,3 +1010,90 @@ once, ideally at different times and from different cameras, with consent and a
 lawful basis. Run them through the pipeline, collect per-modality embeddings
 per sighting, and build `eval.ablation.Observation` records. Everything
 downstream of that point already works.
+
+---
+
+## Upload workflow — enrol and search from the browser ✅
+
+Turns the CLI scripts into an application: upload photos or video of a person,
+then upload footage and find them.
+
+| File | Role |
+|---|---|
+| `app/api/media.py` | uploads → observations; enrolment from **photos**, which did not exist before |
+| `app/api/jobs.py` | in-process background job runner |
+| `app/api/ingest.py` | `POST /enroll`, `/enroll/preview`, `/scan`, `GET /jobs/{id}` |
+| `app/api/scanning.py` | scanning factored out of `scripts/match.py` so the API can report progress |
+| `frontend/src/Enroll.jsx` | enrolment page, webcam recorder, requirements guidance |
+| `frontend/src/Scan.jsx` | footage search and results |
+
+### Photos and video are not interchangeable, and the UI says so
+
+This is the part worth getting right. A profile can look complete and be
+useless: someone who uploads five good photographs has enrolled a perfectly
+good **face** profile and **no gait profile at all**, because a still image
+contains no gait information. Nothing in the numbers would tell them.
+
+`POST /enroll/preview` runs detection only — seconds, no embedding models — and
+reports per signal whether the upload can support it and why not. The enrolment
+page shows the requirements up front and the preview result before committing:
+
+| Signal | Accepts | Needs |
+|---|---|---|
+| Face | photos or video | face visible, roughly front-on, enough pixels |
+| Gait | **video only, of them walking** | ~2s+ of walking, whole body, side-on best |
+| Appearance | photos or video | whole body in frame |
+
+Verified: a photos-only upload reports face ready, appearance ready, **gait not
+ready — "photos only, a still image contains no gait information"**. A video
+upload reports all three ready.
+
+### Decisions worth remembering
+
+**Jobs are in-process, and that trade-off is stated rather than hidden.**
+Celery would need a broker and a worker process for what is a single-machine
+console. The cost: jobs do not survive a restart and there is no retry. Fine
+here — a lost enrolment is re-uploaded — but it is the first thing to replace
+if this ever runs somewhere that matters.
+
+**One job worker.** The models contend for the same 4GB of VRAM; two concurrent
+scans make both slower and risk running out mid-run.
+
+**Uploaded files are deleted as soon as the job finishes.** Enrolment footage
+is personal data, and keeping it after the embeddings are extracted creates a
+second copy to protect for no benefit. There is a test asserting the temp
+directory is gone.
+
+**Scanning records one decision per track, at its best moment**, not one per
+re-match. Twenty pending decisions for one person walking past is noise that
+makes the review queue useless.
+
+**Photos get spaced timestamps, not consecutive frame indices.** Otherwise gait
+would read a cadence out of unrelated stills.
+
+**The webcam recorder releases the camera on unmount.** A webcam left streaming
+keeps its light on, which looks exactly like covert recording.
+
+### Verified end to end on the running server
+
+Uploaded `enroll_subject_a.mp4` → enrolled Ravi Kumar, stored face and
+appearance, **correctly skipped gait** with the reason. Uploaded
+`probe_two_subjects.mp4` → **found Ravi Kumar at 0.84s (frame 21), score
+0.908**, weights face 46% / appearance 54%, recorded as pending decision #1 on
+camera `lobby-north`. `/alerts` stayed empty because nothing was confirmed.
+
+Full suite: **295 passed**.
+
+### Known limits
+
+- **No live camera feeds.** Scanning is upload-and-wait, not a live stream.
+- **No authentication**, so the operator name is claimed rather than verified —
+  and this is now the screen where enrolments are created, which makes it
+  matter more than before.
+- **Scanning is roughly a minute per thousand frames** on this machine. Long
+  CCTV clips are slow; `video.frame_stride` is the lever.
+- A scan finding nothing means nobody scored above threshold, **not** that
+  nobody in the footage is on the watchlist. The results page says so.
+- The accuracy caveat is unchanged and now matters more: a polished upload flow
+  makes the system *look* finished. Nothing here has been validated on real
+  people, and every threshold is still a placeholder.

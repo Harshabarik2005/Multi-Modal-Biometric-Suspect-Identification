@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api, MODALITIES, appearanceShare } from './api'
+import Enroll from './Enroll'
+import Scan from './Scan'
 
 /* ------------------------------------------------------------------ *
  * Explainability
@@ -406,6 +408,8 @@ function Audit({ onError }) {
  * ------------------------------------------------------------------ */
 
 const TABS = [
+  { id: 'enroll', label: 'Enrol someone' },
+  { id: 'scan', label: 'Search footage' },
   { id: 'review', label: 'Review queue' },
   { id: 'watchlist', label: 'Watchlist' },
   { id: 'alerts', label: 'Confirmed' },
@@ -413,7 +417,10 @@ const TABS = [
 ]
 
 export default function App() {
-  const [tab, setTab] = useState('review')
+  const [tab, setTab] = useState('enroll')
+  // Bumped to force the watchlist and queue to refetch after an
+  // enrolment or scan, so the tabs are never stale.
+  const [version, setVersion] = useState(0)
   const [error, setError] = useState(null)
   const [health, setHealth] = useState(null)
   // Kept in localStorage so a reviewer does not retype it, but still recorded
@@ -484,10 +491,22 @@ export default function App() {
       </nav>
 
       <main>
-        {tab === 'review' && <ReviewQueue operator={operator} onError={onError} />}
-        {tab === 'watchlist' && <Watchlist onError={onError} />}
-        {tab === 'alerts' && <Alerts onError={onError} />}
-        {tab === 'audit' && <Audit onError={onError} />}
+        {tab === 'enroll' && (
+          <Enroll
+            operator={operator}
+            onError={onError}
+            onEnrolled={() => setVersion((v) => v + 1)}
+          />
+        )}
+        {tab === 'scan' && (
+          <Scan onError={onError} onScanned={() => setVersion((v) => v + 1)} />
+        )}
+        {tab === 'review' && (
+          <ReviewQueue key={version} operator={operator} onError={onError} />
+        )}
+        {tab === 'watchlist' && <Watchlist key={version} onError={onError} />}
+        {tab === 'alerts' && <Alerts key={version} onError={onError} />}
+        {tab === 'audit' && <Audit key={version} onError={onError} />}
       </main>
     </div>
   )

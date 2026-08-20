@@ -67,6 +67,81 @@ export const api = {
   alerts: (limit = 100) => request(`/alerts?limit=${limit}`),
 
   audit: (limit = 200) => request(`/audit?limit=${limit}`),
+
+  /**
+   * Check what an upload can support before committing to it.
+   *
+   * Runs detection only, so it returns in seconds. Worth calling first: a
+   * photograph contains no gait information at all, and without this the
+   * person only finds out after waiting through a full enrolment that
+   * quietly stored a face-only profile.
+   */
+  previewEnrollment: (files) => upload('/enroll/preview', { files }),
+
+  enroll: ({ files, personId, displayName, notes, operator, replace }) =>
+    upload('/enroll', {
+      files,
+      fields: {
+        person_id: personId,
+        display_name: displayName,
+        notes: notes || '',
+        operator: operator || 'unknown',
+        replace: replace ? 'true' : 'false',
+      },
+    }),
+
+  scan: ({ files, cameraId, threshold }) =>
+    upload('/scan', {
+      files,
+      fields: {
+        camera_id: cameraId || '',
+        threshold: threshold === undefined ? '-1' : String(threshold),
+        record: 'true',
+      },
+    }),
+
+  job: (jobId) => request(`/jobs/${jobId}`),
+}
+
+/** POST multipart form data. Cannot use `request`, which sets a JSON header. */
+async function upload(path, { files = [], fields = {} }) {
+  const body = new FormData()
+  for (const [key, value] of Object.entries(fields)) body.append(key, value)
+  for (const file of files) body.append('files', file, file.name)
+
+  const response = await fetch(`/api${path}`, { method: 'POST', body })
+  if (!response.ok) {
+    let detail = `${response.status} ${response.statusText}`
+    try {
+      const parsed = await response.json()
+      if (parsed.detail) {
+        detail =
+          typeof parsed.detail === 'string'
+            ? parsed.detail
+            : JSON.stringify(parsed.detail)
+      }
+    } catch {
+      // No JSON body; the status line is all there is.
+    }
+    throw new Error(detail)
+  }
+  return response.json()
+}
+
+/**
+ * Poll a background job until it finishes.
+ *
+ * Enrolment and scanning run three models over every frame and take minutes,
+ * so they cannot happen inside a request. `onProgress` is called with each
+ * update so the UI can show what stage it has reached.
+ */
+export async function waitForJob(jobId, onProgress, intervalMs = 1000) {
+  for (;;) {
+    const job = await api.job(jobId)
+    onProgress?.(job)
+    if (job.status === 'succeeded' || job.status === 'failed') return job
+    await new Promise((resolve) => setTimeout(resolve, intervalMs))
+  }
 }
 
 /** Display metadata per modality. Colours are reused by the weight bars. */
