@@ -32,26 +32,44 @@ from app.core.types import Modality  # noqa: E402
 from app.embeddings.face import FaceEmbedder  # noqa: E402
 from app.embeddings.gait import GaitEmbedder  # noqa: E402
 from app.embeddings.reid import ReIDEmbedder  # noqa: E402
+from app.fusion.baseline import build_strategy  # noqa: E402
+from app.fusion.calibration import default_calibrations  # noqa: E402
 from app.matching.gallery import GalleryStore, MatchCandidate  # noqa: E402
 from app.pipeline import DetectionTrackingPipeline  # noqa: E402
 
 logger = get_logger(__name__)
 
 
-def THRESHOLDS_FOR(settings) -> dict[str, float]:
-    """Per-modality match thresholds.
+def reid_trusts(gallery, settings) -> dict[Modality, float]:
+    """How far each modality's stored reference can still be trusted.
 
-    Deliberately not one shared number. The three modalities produce
-    similarities on completely different scales: measured on real crops, two
-    different people scored 0.03 by face but 0.755 by re-ID. A single
-    threshold would either flood the report with false re-ID matches or
-    suppress every real face match.
+    Only re-ID decays. Face and gait describe the person; re-ID largely
+    describes their clothing, so an old reference is far weaker evidence. The
+    oldest enrolment in the gallery sets the decay conservatively, since one
+    trust value covers the whole ranking pass.
     """
-    return {
-        "face": settings.matching.face_threshold,
-        "gait": settings.matching.gait_threshold,
-        "reid": settings.matching.reid_threshold,
-    }
+    from datetime import datetime, timezone
+
+    from app.embeddings.reid import trust_at
+
+    half_life = settings.reid.trust_half_life_days
+    if half_life <= 0:
+        return {}
+
+    oldest_days = 0.0
+    now = datetime.now(timezone.utc)
+    for person in gallery:
+        if not person.enrolled_at:
+            continue
+        try:
+            enrolled = datetime.fromisoformat(person.enrolled_at)
+        except ValueError:
+            continue
+        if enrolled.tzinfo is None:
+            enrolled = enrolled.replace(tzinfo=timezone.utc)
+        oldest_days = max(oldest_days, (now - enrolled).total_seconds() / 86400.0)
+
+    return {Modality.REID: trust_at(oldest_days, half_life)}
 
 
 @dataclass
@@ -66,16 +84,17 @@ class TrackVerdict:
     probe_quality: float = 0.0
     observations: int = 0
     times_matched: int = 0
-    # Which modality produced the best score. Surfaced so the report never
-    # implies a gait match carries the same weight as a face match.
+    # Which modalities contributed, as initials (e.g. "f+r").
     modality: str = "-"
+    # Full per-modality breakdown of the winning score, for the audit log.
+    breakdown: str = ""
     # Every above-threshold hit, for the audit log section 8 requires.
     hits: list[tuple[int, str, float]] = field(default_factory=list)
 
 
 def _report(
     verdicts: dict[int, TrackVerdict],
-    thresholds: dict[str, float],
+    threshold: float,
     show_all: bool,
 ) -> int:
     print()
@@ -83,14 +102,13 @@ def _report(
     print("MATCH REPORT")
     print("=" * 74)
 
-    # Each modality carries its own threshold: a gait score of 0.85 is a far
-    # weaker claim than a face score of 0.85, and one shared number would
-    # quietly equate them.
+    # One threshold is correct here, unlike before fusion: scores are on the
+    # calibrated [0, 1] scale, where 0.5 means "halfway between a stranger and
+    # a genuine match" for every modality alike.
     matched = {
         tid: v
         for tid, v in verdicts.items()
-        if v.best_person_id
-        and v.best_similarity >= thresholds.get(v.modality, 1.1)
+        if v.best_person_id and v.best_similarity >= threshold
     }
     unmatched = {tid: v for tid, v in verdicts.items() if tid not in matched}
 
@@ -110,6 +128,8 @@ def _report(
                 f"{verdict.best_similarity:>6.3f}  {verdict.probe_quality:>5.2f}  "
                 f"{verdict.best_frame:>6}  {verdict.times_matched:>4}"
             )
+            if verdict.breakdown:
+                print(f"           {verdict.breakdown}")
     else:
         print("\nNo track matched anyone on the watchlist.")
 
@@ -141,7 +161,7 @@ def _report(
 def run(args: argparse.Namespace) -> int:
     settings = get_settings(args.config)
     if args.threshold is not None:
-        settings.matching.face_threshold = args.threshold
+        settings.fusion.threshold = args.threshold
     if args.max_frames is not None:
         settings.video.max_frames = args.max_frames
     setup_logging(settings.logging.level)
@@ -163,13 +183,15 @@ def run(args: argparse.Namespace) -> int:
     face_embedder = FaceEmbedder(settings)
     gait_embedder = None if args.no_gait else GaitEmbedder(settings)
     reid_embedder = None if args.no_reid else ReIDEmbedder(settings)
+    strategy = build_strategy(
+        args.strategy or settings.fusion.strategy, default_calibrations(settings)
+    )
     verdicts: dict[int, TrackVerdict] = {}
 
-    thresholds = THRESHOLDS_FOR(settings)
     print(f"Watchlist: {len(gallery)} enrolled.")
     print(
-        "Thresholds: "
-        + ", ".join(f"{name} {value:.2f}" for name, value in thresholds.items())
+        f"Fusion: {strategy.name}, threshold {settings.fusion.threshold:.2f} "
+        "on the calibrated 0-1 scale."
     )
     disabled = [
         name
@@ -178,6 +200,16 @@ def run(args: argparse.Namespace) -> int:
     ]
     if disabled:
         print("Disabled: " + ", ".join(disabled))
+    gait_refs = sum(
+        1 for p in gallery if p.embedding(Modality.GAIT) is not None
+    )
+    need = settings.fusion.gait_min_references_for_centring
+    if gait_refs and gait_refs < need:
+        print(
+            f"Gait comparison is OFF: {gait_refs} gait reference(s), {need} "
+            "needed to estimate the population mean. Uncentred gait scores "
+            "above 0.93 for everyone, so it is refused rather than reported."
+        )
     print()
 
     for result, frame in pipeline.stream(args.source):
@@ -200,30 +232,32 @@ def run(args: argparse.Namespace) -> int:
             verdict = verdicts.setdefault(track_id, TrackVerdict(track_id=track_id))
             verdict.observations = len(buffer)
 
-            # Fall back through the modalities in order of how much each can
-            # be trusted: face, then gait, then appearance. Phases 5 and 6
-            # replace this ladder with real fusion that weighs all three at
-            # once; until then, taking the strongest available signal is the
-            # honest interim behaviour.
-            probe = face_embedder.embed(observations)
-            modality = Modality.FACE
+            # Every modality that has something to say contributes at once.
+            # This replaces the phase-4 fallback ladder: two modalities each
+            # moderately agreeing is stronger evidence than either alone, and
+            # a ladder cannot express that.
+            probes = {}
+            probe_face = face_embedder.embed(observations)
+            if probe_face.has_signal:
+                probes[Modality.FACE] = probe_face
+            if gait_embedder is not None:
+                probe_gait = gait_embedder.embed(observations)
+                if probe_gait.has_signal:
+                    probes[Modality.GAIT] = probe_gait
+            if reid_embedder is not None:
+                probe_reid = reid_embedder.embed(observations)
+                if probe_reid.has_signal:
+                    probes[Modality.REID] = probe_reid
 
-            if not probe.has_signal and gait_embedder is not None:
-                # Face failed: turned away, too distant, masked. This is the
-                # exact case the project exists for.
-                probe = gait_embedder.embed(observations)
-                modality = Modality.GAIT
-
-            if not probe.has_signal and reid_embedder is not None:
-                # No face and not walking. Appearance is all that is left, and
-                # it is the weakest of the three -- see reid_threshold.
-                probe = reid_embedder.embed(observations)
-                modality = Modality.REID
-
-            if not probe.has_signal:
+            if not probes:
                 continue
 
-            candidates: list[MatchCandidate] = gallery.rank_single(modality, probe)
+            candidates: list[MatchCandidate] = gallery.rank(
+                probes,
+                strategy=strategy,
+                trusts=reid_trusts(gallery, settings),
+                gait_min_references=settings.fusion.gait_min_references_for_centring,
+            )
             if not candidates:
                 continue
             best = candidates[0]
@@ -233,11 +267,15 @@ def run(args: argparse.Namespace) -> int:
                 verdict.best_person_id = best.person.person_id
                 verdict.best_person_name = best.person.display_name
                 verdict.best_frame = result.frame_index
-                verdict.probe_quality = probe.quality
-                verdict.modality = modality.value
+                verdict.probe_quality = max(p.quality for p in probes.values())
+                verdict.modality = "+".join(
+                    sorted(m.value[:1] for m in best.weights if best.weights[m] > 0)
+                ) or "-"
+                verdict.breakdown = (
+                    best.fusion.explain() if best.fusion else best.explain()
+                )
 
-            active = THRESHOLDS_FOR(settings)[modality.value]
-            if best.fused_similarity >= active:
+            if best.fused_similarity >= settings.fusion.threshold:
                 verdict.times_matched += 1
                 verdict.hits.append(
                     (
@@ -247,16 +285,19 @@ def run(args: argparse.Namespace) -> int:
                     )
                 )
                 # Audit trail: every match decision is logged with what drove it.
+                # Audit trail (build plan, section 8): every match decision
+                # is logged with the per-modality weights that produced it, so
+                # a reviewer can later see what the system actually relied on.
                 logger.info(
-                    "MATCH frame=%d track=%d person=%s %s quality=%.3f",
+                    "MATCH frame=%d track=%d person=%s fused=%s | raw %s",
                     result.frame_index,
                     track_id,
                     best.person.person_id,
+                    best.fusion.explain() if best.fusion else "n/a",
                     best.explain(),
-                    probe.quality,
                 )
 
-    matched = _report(verdicts, THRESHOLDS_FOR(settings), args.show_all)
+    matched = _report(verdicts, settings.fusion.threshold, args.show_all)
     return 0 if matched or not args.require_match else 1
 
 
@@ -266,7 +307,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--config", default=None)
     parser.add_argument(
         "--threshold", type=float, default=None,
-        help="Cosine similarity above which a track counts as a candidate.",
+        help="Fused score (0-1, calibrated) above which a track is a candidate.",
+    )
+    parser.add_argument(
+        "--strategy", default=None,
+        choices=["single_best", "average", "quality_weighted"],
+        help="Fusion strategy. Defaults to fusion.strategy in config.",
     )
     parser.add_argument("--max-frames", type=int, default=None)
     parser.add_argument(

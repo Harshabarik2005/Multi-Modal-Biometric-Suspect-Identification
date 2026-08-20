@@ -133,6 +133,35 @@ reid:
   # person. Set to 0 to disable decay.
   trust_half_life_days: 3.0
 
+# --- Phases 5-6: fusion ----------------------------------------------------
+fusion:
+  # single_best | average (the reference paper's baseline) | quality_weighted
+  strategy: quality_weighted
+
+  # Anchors putting the three modalities on one comparable scale. Raw cosine
+  # similarities are NOT comparable: measured, two different people score 0.03
+  # by face but 0.755 by re-ID. Averaging raw scores lets re-ID dominate
+  # purely by living in a higher numeric range.
+  #
+  # These are measurements, but from very few clips. Re-derive them from the
+  # Phase-10 TAR@FAR curve on real footage before operational use.
+  face_impostor: 0.03      # different people, measured
+  face_genuine: 0.95       # same person, measured
+  gait_impostor: 0.52      # different walking styles, centred, synthetic
+  gait_genuine: 0.95
+  reid_impostor: 0.755     # different people, measured
+  reid_genuine: 0.980      # same person, measured
+
+  # On the calibrated scale 0.5 means "halfway between a stranger and a
+  # genuine match".
+  threshold: 0.55
+
+  # Gait descriptors are dominated by the shared "generic human" shape, so the
+  # population mean has to be removed before comparing. Below this many
+  # references there is no way to estimate that mean, and gait refuses to
+  # compare rather than returning a misleadingly high similarity.
+  gait_min_references_for_centring: 3
+
 track_buffer:
   # Bounded on purpose: unbounded per-track crop buffers exhaust memory on a
   # busy camera long before anything else breaks.
@@ -145,9 +174,11 @@ matching:
   # Starting point only. Calibrate against your own footage with the Phase-10
   # TAR@FAR curve before trusting any number here.
   face_threshold: 0.40
-  # Gait is far less discriminative than face; this threshold is higher and
-  # a gait-only match means much less. Fusion is what makes gait useful.
-  gait_threshold: 0.80
+  # Gait, compared with the population mean removed. Measured: different
+  # walking styles peaked at 0.516, same style 1.000. WITHOUT centring
+  # everything scores above 0.93 and this would match everyone -- which is why
+  # uncentred gait refuses to compare rather than returning a number.
+  gait_threshold: 0.70
   # Re-ID similarities cluster high and narrow, so face thresholds do not
   # transfer. Measured on real crops: different people 0.755, same person
   # 0.980 -- a 0.75 threshold would have matched strangers.

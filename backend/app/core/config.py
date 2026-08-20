@@ -179,6 +179,43 @@ class ReIDSettings(BaseModel):
     trust_half_life_days: float = 3.0
 
 
+class FusionSettings(BaseModel):
+    """Phases 5-6: combining the three modalities into one score.
+
+    The anchors put the modalities on a comparable scale. They are MEASUREMENTS,
+    not guesses, but from very few clips -- re-derive them from the Phase-10
+    TAR@FAR curve on real footage before trusting any of this operationally.
+    """
+
+    # "single_best", "average" (the paper's baseline), or "quality_weighted".
+    strategy: str = "quality_weighted"
+
+    # Face: measured on real crops. Different people 0.03, same person 0.95.
+    face_impostor: float = 0.03
+    face_genuine: float = 0.95
+
+    # Gait: measured on synthetic walkers AFTER population centring. Without
+    # centring the descriptor barely separates at all (different styles 0.986
+    # vs same 1.000), which is why gait comparisons are refused when the
+    # gallery is too small to centre against.
+    gait_impostor: float = 0.52
+    gait_genuine: float = 0.95
+
+    # Re-ID: measured on real crops. Different people 0.755, same person 0.980.
+    reid_impostor: float = 0.755
+    reid_genuine: float = 0.980
+
+    # Fused score above which a track is a candidate match. On the calibrated
+    # scale, 0.5 means "halfway between a stranger and a genuine match".
+    threshold: float = Field(0.55, ge=0.0, le=1.0)
+
+    # Gait descriptors are dominated by the shared "generic human" shape, so
+    # they must be compared with the population mean removed. That needs enough
+    # references to estimate a mean; below this many, gait refuses to compare
+    # rather than returning a misleadingly high similarity.
+    gait_min_references_for_centring: int = 3
+
+
 class TrackBufferSettings(BaseModel):
     """Per-track frame buffering that feeds the embedding branches."""
 
@@ -201,9 +238,12 @@ class MatchingSettings(BaseModel):
     # Calibrate on real footage via the Phase-10 TAR@FAR curve rather than
     # trusting this default.
     face_threshold: float = Field(0.40, ge=-1.0, le=1.0)
-    # Gait descriptors are far less discriminative than ArcFace, so this
-    # threshold is necessarily higher and means much less on its own.
-    gait_threshold: float = Field(0.80, ge=-1.0, le=1.0)
+    # Gait, compared with the population mean removed. Measured on synthetic
+    # walkers: different styles peaked at 0.516, same style 1.000. WITHOUT
+    # centring, everything scores above 0.93 and this threshold would match
+    # every person alive - which is why uncentred gait refuses to compare at
+    # all rather than returning a number.
+    gait_threshold: float = Field(0.70, ge=-1.0, le=1.0)
     # Re-ID cosine similarities cluster in a high, narrow band, so face-like
     # thresholds do not transfer. Measured on real crops: two different people
     # scored 0.755, the same person across one track scored 0.980. A threshold
@@ -250,6 +290,7 @@ class Settings(BaseSettings):
     face: FaceSettings = FaceSettings()
     gait: GaitSettings = GaitSettings()
     reid: ReIDSettings = ReIDSettings()
+    fusion: FusionSettings = FusionSettings()
     track_buffer: TrackBufferSettings = TrackBufferSettings()
     matching: MatchingSettings = MatchingSettings()
 

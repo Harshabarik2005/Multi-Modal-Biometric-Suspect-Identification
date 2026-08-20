@@ -14,9 +14,9 @@ Identification"* (2023, [arXiv:2303.13814](https://arxiv.org/abs/2303.13814)).
 The full spec, including where this project deliberately diverges from the
 paper, is in [faceless-frs-build-plan.md](faceless-frs-build-plan.md).
 
-> **Status: Phase 4 complete.** All three modalities work end to end — face,
-> gait and re-ID. Matching currently falls back through them in order;
-> real fusion is phases 5–6.
+> **Status: Phase 5 complete.** All three modalities work end to end, and
+> matching now fuses them with calibrated per-modality scores. The learned
+> attention fusion (phase 6) is next.
 
 ## Responsible use
 
@@ -99,7 +99,7 @@ Useful flags:
 The run ends with a report: frames processed, total person detections, and one
 row per track ID showing how many frames it survived.
 
-## Enroll and match (Phases 2-4)
+## Enroll and match (Phases 2-5)
 
 Generate smoke-test fixtures if you have no footage yet:
 
@@ -134,12 +134,23 @@ excellent face reference and no gait reference at all — gait needs several ful
 step cycles. Enroll from footage of the person walking if you want both, and
 `enroll.py --inspect <id>` will show which modalities were actually stored.
 
-**Each modality has its own threshold, and they are not interchangeable.**
-Measured on real crops, two different people score 0.03 by face but 0.755 by
-re-ID — re-ID similarities live in a much higher, narrower band. A single
-shared threshold would flood the report with false re-ID matches. Defaults:
-face 0.40, gait 0.80, re-ID 0.88, all to be calibrated properly against your
-own footage in Phase 10.
+**Scores are fused and calibrated.** The three modalities produce
+similarities on completely different scales — two different people score 0.03
+by face but 0.755 by re-ID — so each is mapped onto a common 0–1 scale before
+being combined, where 0 means "indistinguishable from a stranger" and 1 means
+"as good as a genuine match gets". One threshold (`fusion.threshold`, default
+0.55) then applies to every modality alike.
+
+Pick the fusion rule with `--strategy`:
+
+| Strategy | Behaviour |
+|---|---|
+| `single_best` | Trust only the most reliable modality present |
+| `average` | Equal weight to every modality with a signal (the paper's baseline) |
+| `quality_weighted` | Weight by how good a look each modality got (default) |
+
+The report prints the per-modality breakdown under each match, so you can see
+whether a hit was driven by a clear face or mostly by a jacket.
 
 **Re-ID references go stale.** Re-ID encodes clothing as much as the person, so
 its stored reference decays with a 3-day half-life (`reid.trust_half_life_days`).
@@ -195,7 +206,7 @@ backend/
     embeddings/    face.py, gait.py, silhouette.py, reid.py  [Phases 2-4 ✓]
       vendor/      OSNet model definition, vendored (MIT)
     matching/      watchlist gallery + open-set ranking  [Phase 2 ✓]
-    fusion/        baseline.py / attention.py            [Phases 5-6]
+    fusion/        calibration.py, baseline.py [Phase 5 ✓] / attention.py [Phase 6]
     api/           FastAPI routes                        [Phase 7]
     db/            models + migrations                   [Phase 7]
     alerts/        Twilio / SMTP                         [Phase 9]
@@ -211,22 +222,27 @@ data/
 docs/
 ```
 
-Modules for phases 5+ exist as documented placeholders that raise
+Modules for phases 6+ exist as documented placeholders that raise
 `NotImplementedError` — the layout is in place, the code is not.
 
-## Next: Phase 5
+## Next: Phase 6
 
-Baseline fusion — fixed-weight averaging over the three modalities, to give
-Phase 6's attention fusion a number to beat.
+Keyless attention fusion — the project's core contribution. A small trainable
+head that learns, per frame, how far to trust each modality, replacing the
+fixed rules of Phase 5.
 
-The main trap, already measured: the three modalities produce similarities on
-completely different scales (face 0.03/0.95 for different/same, re-ID
-0.755/0.980). They cannot be averaged raw or re-ID will dominate every fused
-score purely by living in a higher numeric range.
+The concrete failure it has to fix is already measured: on the test clip
+`quality_weighted` gave re-ID *more* weight than face (0.54 vs 0.46), because
+the re-ID crop scored higher quality even though face is far more
+discriminative. Fixed rules weight by how good a look you got, not by how much
+that modality is worth.
+
+Training it needs labelled same/different pairs from real footage, which does
+not exist yet. An untrained attention head is strictly worse than the fixed
+rules it replaces, so this is where real data stops being optional.
 
 Two standing caveats on modality strength. Gait uses a **classical GEI
 descriptor, not a learned embedding**, because OpenGait ships no licence file
-and its weights are unusable without vendoring its model code. Re-ID is
-strongest within a single camera and day and degrades across both. Both should
-earn lower attention weights than face in Phase 6 — the correct outcome rather
-than a bug.
+and its weights are unusable without vendoring its model code — and its
+descriptors must be population-centred to discriminate at all. Re-ID is
+strongest within a single camera and day and degrades across both.

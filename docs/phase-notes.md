@@ -415,21 +415,139 @@ detection confidence.
 
 ---
 
-## Phase 5 — baseline fusion (next)
+## Phase 5 — baseline fusion ✅
 
-Simple rule-based and average fusion over the three modality embeddings,
-mirroring the "average fusion" row of the reference paper's Table I.
-Deliberately dumb: fixed weights, no learning. Its whole job is to be the
-number Phase 6's attention fusion has to beat, so it must be implemented
-honestly rather than hobbled.
+**Delivered:** per-modality calibration, three fixed-rule fusion strategies,
+and gait population centring, replacing the phase-4 fallback ladder.
 
-Two things it needs that already exist: `ModalityEmbedding.quality` per branch,
-and `trust_at()` for re-ID staleness. The obvious baselines to implement are
-equal-weight averaging, quality-weighted averaging, and max-confidence
-selection — reporting all three gives Phase 6 a real bar to clear.
+| File | Role |
+|---|---|
+| `app/fusion/calibration.py` | `ModalityCalibration` — puts modalities on one scale |
+| `app/fusion/baseline.py` | `SingleBestFusion`, `AverageFusion`, `QualityWeightedFusion` |
+| `app/matching/gallery.py` | fusion in `rank()`, gait population centring |
 
-The per-modality similarity scales measured so far (face: 0.03 different /
-0.95 same; re-ID: 0.755 / 0.980) mean raw similarities **cannot** be averaged
-directly — they must be calibrated onto a comparable scale first, or re-ID will
-dominate every fused score purely by living in a higher numeric range. That is
-the main trap in this phase.
+### Raw similarities cannot be averaged
+
+The measurements from phases 2–4 make this concrete:
+
+| modality | different people | same person | gap |
+|---|---|---|---|
+| face | 0.03 | 0.95 | 0.92 |
+| gait (centred) | 0.52 | 1.00 | 0.48 |
+| re-ID | 0.755 | 0.980 | 0.225 |
+
+Averaging these raw would let re-ID dominate every fused score purely by living
+in a higher numeric range — a face score of 0.60, a strong identification,
+would be dragged down by a re-ID score of 0.70, which is nothing at all.
+
+`ModalityCalibration` maps each modality onto a common [0, 1] scale anchored on
+its measured impostor and genuine points. Calibrated 0.0 means
+"indistinguishable from a stranger", 1.0 means "as good as a genuine match
+gets", for every modality alike. It is a linear rescale, **not** a probability —
+a calibrated 0.7 does not mean a 70% chance of identity. Real probability
+calibration needs labelled pairs, which is Phase 10.
+
+The effect is visible on the probe clip: the impostor whose raw re-ID score was
+0.771 — which would have matched at the phase-4 threshold of 0.75 — now
+calibrates to **0.069** and is decisively rejected.
+
+### The gait finding that changed the design
+
+Measuring the gait descriptor for calibration anchors turned up something worse
+than expected. On synthetic walkers, cosine similarity between *different*
+walking styles averaged 0.962, against 1.000 for the same style — a separation
+of **0.014**. Two consequences:
+
+1. The phase-3 `gait_threshold: 0.80` was another false-positive bug of the
+   same family as the re-ID one. Everything scores above 0.93, so it would have
+   matched every person alive.
+2. The cause is structural, not a tuning problem: **every GEI looks like a
+   blurry human**, so cosine similarity is dominated by that shared shape.
+
+The classical remedy — projecting out the population mean — transforms it:
+
+| | same person | different (max) | separation |
+|---|---|---|---|
+| raw | 1.000 | 0.986 | +0.014 |
+| mean-centred | 1.000 | 0.516 | **+0.484** |
+
+A 34× improvement, by removing the "generic human" component and leaving what
+actually distinguishes people.
+
+Estimating that mean needs several references, so `Gallery.gait_population_mean`
+returns `None` below `fusion.gait_min_references_for_centring` (default 3), and
+gait comparison is then **refused outright** rather than falling back to raw.
+That refusal is the important part: an uncentred gait similarity of 0.96 looks
+like a confident match and is not one. Returning `None` routes it through the
+"could not compare" path built in Phase 2, so fusion excludes it rather than
+treating it as evidence.
+
+### Decisions worth remembering
+
+**Missing modalities are excluded, not zeroed.** A face that could not be seen
+is not evidence against a match. Scoring it 0 would actively penalise the exact
+situation this project exists to handle. Tested directly: a probe with no face
+and a strong re-ID scores higher than one with a *stranger's* face and the same
+re-ID.
+
+**The baselines are implemented honestly.** A hobbled baseline makes the Phase-6
+contribution look good and proves nothing, so each is the strongest version of
+its idea. `QualityWeightedFusion` already does something the reference paper's
+average-fusion baseline cannot — a clear frontal face outvotes a glancing one.
+
+**`SingleBestFusion` prioritises by reliability, not by score.** Otherwise a
+weak modality wins by being generous: re-ID at its ceiling calibrates to 1.0
+while a mediocre face calibrates lower, and picking the larger number would
+hand the decision to the least trustworthy signal.
+
+### Verified on this machine
+
+All three strategies on the probe clip (enrolled subject + impostor):
+
+| strategy | enrolled subject | impostor |
+|---|---|---|
+| `single_best` | 1.000 (face) | 0.069 |
+| `average` | 0.919 (face 0.50 + reid 0.50) | 0.069 |
+| `quality_weighted` | 0.913 (face 0.46 + reid 0.54) | 0.069 |
+
+Full suite: **148 passed**.
+
+### Known limits at this phase
+
+- **The strategies cannot yet be ranked.** One genuine and one impostor is not
+  an evaluation. Which fusion rule is actually better needs TAR@FAR over many
+  pairs — Phase 10. Do not read the table above as `single_best` winning.
+- **`quality_weighted` gave re-ID more weight than face (0.54 vs 0.46)** on this
+  clip, because the re-ID crop scored higher *quality* even though face is far
+  more *discriminative*. That is the baseline's central blind spot: it weights
+  by how good a look you got, not by how much that modality is worth. Learning
+  that distinction is precisely Phase 6's job, and this is the concrete failure
+  the attention head has to fix.
+- The anchors are measurements, but from very few clips, and gait's come from
+  synthetic walkers. Re-derive all six from real footage in Phase 10.
+- One trust value covers a whole ranking pass, taken from the oldest enrolment.
+  Per-person decay needs per-person timestamps threaded through ranking.
+
+---
+
+## Phase 6 — keyless attention fusion (next)
+
+The core contribution. A small trainable head that scores each modality *per
+frame*, normalises those into global weights (α face, β gait, γ re-ID), and
+produces one adaptive embedding.
+
+Two things Phase 5 established that shape this:
+
+1. **The bar is `quality_weighted`, not `average`.** The paper compares against
+   average fusion; this project has a stronger baseline, and beating the weaker
+   one would prove little.
+2. **The specific failure to fix is visible**: fixed rules weight by look
+   quality, not by modality worth. The attention head should learn that a
+   mediocre face beats an excellent jacket.
+
+Training needs labelled same/different pairs, which means real footage — the
+same blocker as gait's positive validation. Until that exists, the head can be
+built and unit-tested but not honestly trained, and an untrained attention head
+is strictly worse than the fixed rules it replaces. Consider training on
+CASIA-B or a public re-ID dataset as a stopgap, with the caveat that the
+learned weights would reflect that data's conditions, not yours.

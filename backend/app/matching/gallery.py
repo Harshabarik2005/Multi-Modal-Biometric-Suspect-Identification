@@ -32,7 +32,12 @@ import numpy as np
 
 from app.core.config import Settings, get_settings
 from app.core.logging import get_logger
-from app.core.types import Modality, ModalityEmbedding, cosine_similarity
+from app.core.types import (
+    Modality,
+    ModalityEmbedding,
+    cosine_similarity,
+    l2_normalize,
+)
 
 logger = get_logger(__name__)
 
@@ -80,6 +85,10 @@ class MatchCandidate:
     # these with fixed weights, Phase 6 with learned attention. Surfaced in the
     # dashboard so a reviewer can see what drove the match.
     weights: dict[Modality, float] = field(default_factory=dict)
+    # Full fusion breakdown (a `FusionResult`) when a strategy was used, for
+    # the audit log and the explainability view. Typed loosely to keep the
+    # gallery from importing the fusion package at module scope.
+    fusion: object | None = None
 
     @property
     def comparable_modalities(self) -> list[Modality]:
@@ -129,31 +138,123 @@ class Gallery:
     def people(self) -> list[PersonRecord]:
         return list(self._people.values())
 
+    # -- gait population centring -----------------------------------------
+
+    def gait_population_mean(self, min_references: int) -> np.ndarray | None:
+        """Mean of every enrolled gait descriptor, or None if too few.
+
+        Every Gait Energy Image looks like a blurry human, so raw cosine
+        similarity between two GEI descriptors is dominated by that shared
+        shape: measured on synthetic walkers, different walking styles scored
+        0.986 against 1.000 for the same style -- a separation of 0.014, which
+        is useless. Removing the population mean strips the "generic human"
+        component and leaves what actually distinguishes people, taking the
+        separation to 0.484.
+
+        Estimating that mean needs several references. Below `min_references`
+        this returns None and gait comparison is refused outright, because an
+        uncentred gait similarity of 0.96 looks like a strong match and is not.
+        """
+        vectors = [
+            person.embeddings[Modality.GAIT].vector
+            for person in self._people.values()
+            if person.embedding(Modality.GAIT) is not None
+        ]
+        if len(vectors) < min_references:
+            return None
+        return l2_normalize(np.mean(np.stack(vectors), axis=0))
+
+    @staticmethod
+    def remove_population_component(
+        vector: np.ndarray, mean: np.ndarray
+    ) -> np.ndarray:
+        """Project out the population mean, then renormalise."""
+        vector = np.asarray(vector, dtype=np.float32).ravel()
+        residual = vector - float(np.dot(vector, mean)) * mean
+        return l2_normalize(residual)
+
+    def _gait_similarity(
+        self,
+        probe: ModalityEmbedding,
+        reference: ModalityEmbedding,
+        mean: np.ndarray | None,
+    ) -> float | None:
+        """Gait similarity with the population component removed.
+
+        Returns None when there is no population mean available. That is a
+        deliberate refusal rather than a fallback: uncentred gait similarities
+        sit above 0.93 for everyone, so returning one would manufacture a
+        confident match out of nothing.
+        """
+        if mean is None:
+            return None
+        return cosine_similarity(
+            self.remove_population_component(probe.vector, mean),
+            self.remove_population_component(reference.vector, mean),
+        )
+
+    # -- ranking -----------------------------------------------------------
+
     def rank(
-        self, probes: dict[Modality, ModalityEmbedding]
+        self,
+        probes: dict[Modality, ModalityEmbedding],
+        strategy=None,
+        trusts: dict[Modality, float] | None = None,
+        gait_min_references: int = 3,
     ) -> list[MatchCandidate]:
         """Score every enrolled person against this track's embeddings.
 
         Returns candidates sorted best-first. Scoring only -- it deliberately
         does not decide what counts as a match; thresholding is the caller's
         job, and in production a human's.
+
+        With a `strategy`, `fused_similarity` is the fused calibrated score in
+        [0, 1] and `weights` records what drove it. Without one, only the
+        per-modality scores are filled in.
         """
+        trusts = trusts or {}
+        gait_mean = (
+            self.gait_population_mean(gait_min_references)
+            if Modality.GAIT in probes
+            else None
+        )
         candidates: list[MatchCandidate] = []
 
         for person in self._people.values():
             candidate = MatchCandidate(person=person)
             for modality, probe in probes.items():
                 reference = person.embedding(modality)
-                similarity = (
-                    probe.similarity(reference)
-                    if reference is not None and probe.has_signal
-                    else None
-                )
+                if reference is None or not probe.has_signal:
+                    similarity = None
+                elif modality is Modality.GAIT:
+                    similarity = self._gait_similarity(probe, reference, gait_mean)
+                else:
+                    similarity = probe.similarity(reference)
+
                 candidate.scores[modality] = ModalityScore(
                     modality=modality,
                     similarity=similarity,
                     probe_quality=probe.quality,
                 )
+
+            if strategy is not None:
+                from app.fusion.baseline import FusionInput
+
+                result = strategy.fuse(
+                    [
+                        FusionInput(
+                            modality=modality,
+                            similarity=score.similarity,
+                            quality=score.probe_quality,
+                            trust=trusts.get(modality, 1.0),
+                        )
+                        for modality, score in candidate.scores.items()
+                    ]
+                )
+                candidate.fused_similarity = result.score
+                candidate.weights = result.weights
+                candidate.fusion = result
+
             candidates.append(candidate)
 
         return sorted(candidates, key=lambda c: c.fused_similarity, reverse=True)
