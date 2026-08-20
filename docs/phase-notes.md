@@ -530,24 +530,130 @@ Full suite: **148 passed**.
 
 ---
 
-## Phase 6 — keyless attention fusion (next)
+## Phase 6 — keyless attention fusion ⚠️ built, not deployable
 
-The core contribution. A small trainable head that scores each modality *per
-frame*, normalises those into global weights (α face, β gait, γ re-ID), and
-produces one adaptive embedding.
+**Delivered:** the attention head, its training harness, a synthetic training
+demonstration, and a hard gate stopping an untrained head being used.
 
-Two things Phase 5 established that shape this:
+**Not delivered:** a head trained on real data, because there is none. This
+phase is architecturally complete and honestly unusable, and the code says so
+in both places it matters — `is_trained` is False until trained, and
+`rank_attention` refuses outright.
 
-1. **The bar is `quality_weighted`, not `average`.** The paper compares against
-   average fusion; this project has a stronger baseline, and beating the weaker
-   one would prove little.
-2. **The specific failure to fix is visible**: fixed rules weight by look
-   quality, not by modality worth. The attention head should learn that a
-   mediocre face beats an excellent jacket.
+| File | Role |
+|---|---|
+| `app/fusion/attention.py` | `KeylessAttentionFusion`, `triplet_loss` |
+| `app/fusion/training.py` | triplet training, early stopping, synthetic data |
+| `app/matching/gallery.py` | `rank_attention` — compares in the fused space |
+| `scripts/train_fusion.py` | training CLI |
 
-Training needs labelled same/different pairs, which means real footage — the
-same blocker as gait's positive validation. Until that exists, the head can be
-built and unit-tested but not honestly trained, and an untrained attention head
-is strictly worse than the fixed rules it replaces. Consider training on
-CASIA-B or a public re-ID dataset as a stopgap, with the caveat that the
-learned weights would reflect that data's conditions, not yours.
+### What it does differently from Phase 5
+
+The fixed rules fuse per-modality *similarities*. The attention head fuses
+*embeddings* into one adaptive vector, and matching happens once in that shared
+space. That is the paper's formulation, and it is why the head must be trained:
+it learns a joint representation, not a weighted average of scores.
+
+"Keyless" means there is no query. Each modality's projected embedding, plus
+how good a look it got, is scored directly by a learned function, and those are
+softmaxed into α (face), β (gait), γ (re-ID).
+
+Three divergences from the reference paper, all forced by this project's shape:
+three modalities rather than two; triplet loss on cosine distance rather than a
+closed-set softmax, because the watchlist grows; and per-modality projections,
+because face (512-d), re-ID (512-d) and gait (812-d) cannot be summed directly.
+
+### It fixes the failure Phase 5 exposed
+
+Phase 5 measured `QualityWeightedFusion` giving re-ID **more** weight than face
+(0.54 vs 0.46), because fixed rules weight by *how good a look you got* rather
+than *how much the modality is worth*. The trained head reverses this. On
+synthetic data where face is far less noisy but often absent, and re-ID is
+noisier but almost always present:
+
+    face   0.591   (available 59%)
+    reid   0.541   (available 97%)
+    gait   0.248   (available 51%)
+
+### Three bugs worth remembering
+
+**The weight report was misleading, not the weights.** The first run appeared
+to show the head preferring re-ID (0.495) over face (0.285) — the opposite of
+what it should learn. It was averaging over *all* rows including those where
+face was absent, so face's number was being dragged down by its 59%
+availability rather than by any learned preference. Conditioned on presence,
+face led all along. `TrainingReport` now reports both, and names the
+present-only figure as the one to read.
+
+**Initialisation was unseeded.** `train()` seeded torch, but the model was
+constructed *before* that, so weight init came from ambient RNG state. The same
+configuration measured both 1.78× and 4.37× overfitting purely because the
+model was built at a different point in the program. Seeding now starts at
+construction, and a test asserts reproducibility.
+
+**The head does not reliably learn the weighting when under-resourced.** A
+first test failed with face 0.514 against re-ID 0.581. Rather than hunt for a
+passing seed, measured across six seeds:
+
+| configuration | face > re-ID |
+|---|---|
+| 16-d modalities, 64-d shared, 800 triplets | **2/6** — a coin flip |
+| 64-d modalities, 128-d shared, 1500 triplets | **6/6** — reliable |
+
+Under-resourced, the head learns nothing useful about weighting. That is a real
+deployment constraint, and the test now encodes the adequate configuration with
+a slow multi-seed test guarding against regression.
+
+### Refusing to run untrained
+
+An untrained head is *worse* than the fixed rules it replaces: random
+projections destroy Phase 5's careful calibration. So `fuse_one` and
+`rank_attention` both raise rather than return noise, `train_fusion.py` refuses
+to save a head whose train/validation separation ratio is ≥ 3.0, and
+`rank_attention` rejects a dimension mismatch with an explicit message — which
+is exactly what a synthetic-trained head hits against real 512-d embeddings.
+
+### Verified on this machine
+
+- Absent modalities take exactly zero weight and do not dilute the softmax.
+- A row with no modality at all yields no NaN, which would otherwise poison
+  the whole batch's gradients.
+- Training reduces loss, early-stops, and restores the best weights.
+- Save/load round-trips to identical outputs.
+- `rank_attention` ranks correctly (0.788 vs −0.274) and refuses untrained
+  heads and dimension mismatches.
+- Full suite: **176 passed**.
+
+### Known limits at this phase
+
+- **The head is trained on synthetic data only, so it must not be used.** The
+  synthetic identities are random vectors with tuned noise; real embeddings
+  have structure this does not reproduce.
+- **Overfitting persists** even with weight decay, early stopping and a
+  validation split: roughly 2× train/validation separation at best. Synthetic
+  identities are fresh random draws, so there is little transferable structure
+  beyond the weighting policy itself.
+- **It has never been compared against the Phase-5 baselines on real data.**
+  Whether attention actually beats `quality_weighted` is the central claim of
+  this project and is currently unproven. That comparison is Phase 10's
+  ablation table.
+- `rank_attention` returns `None` for per-modality similarities, since
+  comparison happens only in the fused space. The dashboard's explainability
+  view will need the attention weights instead, which are recorded.
+
+---
+
+## Phase 7 — backend API and database (next)
+
+FastAPI routes plus persistence. The gallery interface was kept deliberately
+narrow in Phase 2 so this swap stays cheap: `GalleryStore` is the only thing
+that touches disk.
+
+What the schema has to carry, from section 8 rather than convenience:
+biometric templates encrypted at rest (already implemented in `GalleryStore`,
+needs porting), and an append-only audit record for every match decision
+including its per-modality weights and the confirming operator.
+
+The match endpoint should return the fusion breakdown, not just a score. The
+Phase-8 dashboard needs it, and a reviewer confirming a match needs to see
+whether it rested on a clear face or mostly on a jacket.

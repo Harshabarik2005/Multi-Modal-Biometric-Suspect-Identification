@@ -259,6 +259,70 @@ class Gallery:
 
         return sorted(candidates, key=lambda c: c.fused_similarity, reverse=True)
 
+    def rank_attention(
+        self,
+        probes: dict[Modality, ModalityEmbedding],
+        model,
+    ) -> list[MatchCandidate]:
+        """Rank using the learned attention head (Phase 6).
+
+        Structurally different from `rank()`. The Phase-5 strategies fuse
+        per-modality *similarities*; the attention head fuses *embeddings* into
+        a single adaptive vector, so both the probe and every enrolled person
+        are fused first and compared once in that shared space. That is the
+        paper's formulation, and it is why the head has to be trained: it is
+        learning a joint representation, not a weighted average of scores.
+        """
+        if not getattr(model, "is_trained", False):
+            raise RuntimeError(
+                "The attention head is untrained. Ranking with it would produce "
+                "noise strictly worse than the Phase-5 fixed rules."
+            )
+
+        for modality, probe in probes.items():
+            expected = model.dims.get(modality)
+            if expected is not None and probe.vector.size != expected:
+                raise ValueError(
+                    f"The attention head expects {expected}-d {modality.value} "
+                    f"embeddings but got {probe.vector.size}-d. A head trained "
+                    "on synthetic data cannot fuse real embeddings; retrain it "
+                    "on real footage with matching dimensions."
+                )
+
+        probe_vector, probe_weights = model.fuse_one(
+            {m: e.vector for m, e in probes.items() if e.has_signal},
+            {m: e.quality for m, e in probes.items()},
+        )
+
+        candidates: list[MatchCandidate] = []
+        for person in self._people.values():
+            references = {
+                m: person.embeddings[m].vector
+                for m in person.modalities
+                if m in model.dims
+            }
+            if not references:
+                continue
+            reference_vector, _ = model.fuse_one(
+                references,
+                {m: person.embeddings[m].quality for m in references},
+            )
+
+            candidate = MatchCandidate(person=person)
+            candidate.fused_similarity = cosine_similarity(
+                probe_vector, reference_vector
+            )
+            candidate.weights = {m: w for m, w in probe_weights.items() if w > 0.0}
+            for modality, probe in probes.items():
+                candidate.scores[modality] = ModalityScore(
+                    modality=modality,
+                    similarity=None,  # attention compares in the fused space only
+                    probe_quality=probe.quality,
+                )
+            candidates.append(candidate)
+
+        return sorted(candidates, key=lambda c: c.fused_similarity, reverse=True)
+
     def rank_single(
         self, modality: Modality, probe: ModalityEmbedding
     ) -> list[MatchCandidate]:

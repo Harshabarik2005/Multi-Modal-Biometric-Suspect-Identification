@@ -14,9 +14,11 @@ Identification"* (2023, [arXiv:2303.13814](https://arxiv.org/abs/2303.13814)).
 The full spec, including where this project deliberately diverges from the
 paper, is in [faceless-frs-build-plan.md](faceless-frs-build-plan.md).
 
-> **Status: Phase 5 complete.** All three modalities work end to end, and
-> matching now fuses them with calibrated per-modality scores. The learned
-> attention fusion (phase 6) is next.
+> **Status: Phases 1–5 complete; phase 6 built but not deployable.** All
+> three modalities work end to end and matching fuses them with calibrated
+> scores. The keyless attention head (phase 6) is implemented and trains,
+> but only on synthetic data — it refuses to run untrained, and training it
+> for real needs footage that does not exist yet.
 
 ## Responsible use
 
@@ -206,7 +208,8 @@ backend/
     embeddings/    face.py, gait.py, silhouette.py, reid.py  [Phases 2-4 ✓]
       vendor/      OSNet model definition, vendored (MIT)
     matching/      watchlist gallery + open-set ranking  [Phase 2 ✓]
-    fusion/        calibration.py, baseline.py [Phase 5 ✓] / attention.py [Phase 6]
+    fusion/        calibration.py, baseline.py [Phase 5 ✓]
+                   attention.py, training.py   [Phase 6, untrained]
     api/           FastAPI routes                        [Phase 7]
     db/            models + migrations                   [Phase 7]
     alerts/        Twilio / SMTP                         [Phase 9]
@@ -222,24 +225,31 @@ data/
 docs/
 ```
 
-Modules for phases 6+ exist as documented placeholders that raise
+Modules for phases 7+ exist as documented placeholders that raise
 `NotImplementedError` — the layout is in place, the code is not.
 
-## Next: Phase 6
+## The attention head (Phase 6)
 
-Keyless attention fusion — the project's core contribution. A small trainable
-head that learns, per frame, how far to trust each modality, replacing the
-fixed rules of Phase 5.
+The project's core contribution is implemented and trains:
 
-The concrete failure it has to fix is already measured: on the test clip
-`quality_weighted` gave re-ID *more* weight than face (0.54 vs 0.46), because
-the re-ID crop scored higher quality even though face is far more
-discriminative. Fixed rules weight by how good a look you got, not by how much
-that modality is worth.
+```bash
+cd backend && python scripts/train_fusion.py --synthetic
+```
 
-Training it needs labelled same/different pairs from real footage, which does
-not exist yet. An untrained attention head is strictly worse than the fixed
-rules it replaces, so this is where real data stops being optional.
+On synthetic data it learns exactly what it should — weighting face (0.591)
+above re-ID (0.541) when both are present, reversing the mistake the fixed
+rules make.
+
+**It cannot be used for real matching.** It is trained on synthetic identities
+that do not reproduce the structure of real embeddings, so it refuses to run
+against real footage rather than silently producing worse results than the
+Phase-5 rules. Training it properly needs labelled same/different pairs — the
+same person recorded twice plus other people — which is where real footage
+stops being optional.
+
+## Next: Phase 7
+
+Backend API and database. See [docs/phase-notes.md](docs/phase-notes.md).
 
 Two standing caveats on modality strength. Gait uses a **classical GEI
 descriptor, not a learned embedding**, because OpenGait ships no licence file
