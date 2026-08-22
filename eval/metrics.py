@@ -68,6 +68,13 @@ class VerificationReport:
     impostor_mean: float = 0.0
     roc: list[ROCPoint] = field(default_factory=list)
 
+    #: The finest FAR this many impostor pairs can actually distinguish.
+    #: 500 pairs cannot resolve anything below 1/500.
+    smallest_resolvable_far: float = 1.0
+    #: Requested FARs below that floor. Their TAR figures are artefacts of the
+    #: sample size and should not be read as results.
+    unresolvable_fars: list[float] = field(default_factory=list)
+
     @property
     def separation(self) -> float:
         return self.genuine_mean - self.impostor_mean
@@ -85,9 +92,15 @@ class VerificationReport:
             "TAR at fixed FAR (threshold in brackets):",
         ]
         for far in sorted(self.tar_at_far, reverse=True):
+            flag = "  (below resolution)" if far in self.unresolvable_fars else ""
             lines.append(
                 f"  FAR {far:<8g} TAR {self.tar_at_far[far]:.4f}   "
-                f"[{self.threshold_at_far[far]:+.3f}]"
+                f"[{self.threshold_at_far[far]:+.3f}]{flag}"
+            )
+        if self.unresolvable_fars:
+            lines.append(
+                f"  {self.impostor_count} impostor pairs cannot resolve below "
+                f"FAR {self.smallest_resolvable_far:g}."
             )
         return lines
 
@@ -237,11 +250,13 @@ def evaluate_verification(
     # A FAR finer than the impostor set can resolve is not measurable: with
     # 500 impostor pairs the smallest non-zero FAR is 1/500 = 0.002, and
     # anything below that is an artefact of the sample size, not a result.
-    resolvable = 1.0 / impostor.size if impostor.size else 1.0
-    for far in fars:
-        if far < resolvable:
-            report.tar_at_far[far] = report.tar_at_far.get(far, 0.0)
-    report.smallest_resolvable_far = resolvable  # type: ignore[attr-defined]
+    # This used to read `report.tar_at_far[far] = report.tar_at_far.get(far, 0.0)`
+    # -- a self-assignment that changed nothing, so unmeasurable operating
+    # points were reported as though they were real.
+    report.smallest_resolvable_far = 1.0 / impostor.size if impostor.size else 1.0
+    report.unresolvable_fars = sorted(
+        far for far in fars if far < report.smallest_resolvable_far
+    )
     return report
 
 
@@ -307,22 +322,56 @@ def pairwise_scores(
     return genuine, impostor
 
 
+@dataclass
+class GroupReport:
+    """One group's error rates at the SHARED operating threshold."""
+
+    group: str
+    genuine_count: int
+    impostor_count: int
+    #: Fraction of this group's genuine pairs accepted at the shared threshold.
+    tar: float
+    #: Fraction of this group's impostor pairs accepted at it.
+    far: float
+    auc: float
+    threshold: float
+    #: True when the requested FAR was unachievable and the equal-error point
+    #: was used instead. Without this, a table of zeros looks like parity.
+    threshold_is_fallback: bool = False
+    target_far: float = 0.01
+
+    @property
+    def miss_rate(self) -> float:
+        return 1.0 - self.tar
+
+
 def fairness_breakdown(
     genuine: np.ndarray,
     impostor: np.ndarray,
     genuine_groups: np.ndarray,
     impostor_groups: np.ndarray,
-    fars: tuple[float, ...] = (0.01, 0.001),
-) -> dict[str, VerificationReport]:
-    """Per-group verification reports (build plan, section 8).
+    target_far: float = 0.01,
+) -> dict[str, GroupReport]:
+    """Per-group TAR and FAR at ONE shared threshold (build plan, section 8).
 
-    Biometric systems routinely perform unevenly across demographic groups, and
-    an aggregate number hides that completely: a system can look strong overall
-    while failing badly for one group. Reporting per-group TAR@FAR at a *shared*
-    threshold is what makes such a gap visible.
+    The threshold is derived once, from the pooled impostor distribution, and
+    then applied to every group -- because that is what a deployment does. It
+    sets one threshold and everyone is judged against it.
 
-    Groups are supplied by the caller rather than inferred. This code does not
-    and must not attempt to infer demographic attributes from biometric data.
+    This previously called `evaluate_verification` per group, which derives a
+    fresh threshold from each group's own impostor scores. That measures each
+    group at its own private operating point, which no deployment uses, and it
+    inverted the finding: a group that was being missed 57% of the time at the
+    real threshold reported TAR 1.000, while a group being falsely flagged
+    reported 0.824. The number that matters is what happens to each group at
+    the threshold actually in use.
+
+    Both TAR and FAR are reported per group. They are different harms -- a low
+    TAR means a group is missed, a high FAR means a group is falsely flagged --
+    and reporting only one hides half the problem.
+
+    Groups are supplied by the caller. This code does not and must not attempt
+    to infer demographic attributes from biometric data.
     """
     genuine = np.asarray(genuine, dtype=np.float64).ravel()
     impostor = np.asarray(impostor, dtype=np.float64).ravel()
@@ -331,14 +380,96 @@ def fairness_breakdown(
 
     if genuine.size != genuine_groups.size or impostor.size != impostor_groups.size:
         raise ValueError("Scores and group labels must be the same length.")
+    if genuine.size == 0 or impostor.size == 0:
+        raise ValueError("Both genuine and impostor scores are required.")
 
-    reports: dict[str, VerificationReport] = {}
+    # One threshold, from the pooled impostor set: the operating point a
+    # deployment would actually choose.
+    pooled_tar, shared_threshold = tar_at_far(genuine, impostor, target_far)
+
+    # If the requested FAR is unachievable, every group scores TAR 0 and the
+    # table reads as "all groups equal" when it actually means "this operating
+    # point does not exist on this data". Fall back to the equal-error point,
+    # which always exists, and record that it happened.
+    fell_back = False
+    if not np.isfinite(shared_threshold) or pooled_tar <= 0.0:
+        _, shared_threshold = equal_error_rate(genuine, impostor)
+        fell_back = True
+
+    reports: dict[str, GroupReport] = {}
     for group in sorted(set(genuine_groups.tolist()) | set(impostor_groups.tolist())):
         group_genuine = genuine[genuine_groups == group]
         group_impostor = impostor[impostor_groups == group]
         if group_genuine.size == 0 or group_impostor.size == 0:
             continue
-        reports[str(group)] = evaluate_verification(
-            group_genuine, group_impostor, fars=fars
+
+        reports[str(group)] = GroupReport(
+            group=str(group),
+            genuine_count=int(group_genuine.size),
+            impostor_count=int(group_impostor.size),
+            tar=float((group_genuine >= shared_threshold).mean()),
+            far=float((group_impostor >= shared_threshold).mean()),
+            auc=roc_auc(group_genuine, group_impostor),
+            threshold=float(shared_threshold),
+            threshold_is_fallback=fell_back,
+            target_far=target_far,
         )
     return reports
+
+
+def fairness_summary(reports: dict[str, GroupReport]) -> list[str]:
+    """Readable table, with the spread called out.
+
+    The spread is the finding. An aggregate number can look strong while one
+    group is served far worse, and that is the whole reason this breakdown
+    exists.
+    """
+    if not reports:
+        return ["no group had both genuine and impostor pairs"]
+
+    first = next(iter(reports.values()))
+    threshold = first.threshold
+    lines = [
+        f"All groups judged at the SAME threshold ({threshold:+.3f}), which is",
+        "what a deployment does. TAR is how often the group is correctly found;",
+        "FAR is how often it is falsely flagged. Both matter, differently.",
+    ]
+    if first.threshold_is_fallback:
+        lines.append("")
+        lines.append(
+            f"NOTE: FAR {first.target_far:g} is unachievable on this data -- no "
+            "threshold reaches\nit with any true accepts at all. Using the "
+            "equal-error point instead.\nA row of zeros here would have looked "
+            "like parity between groups; it\nwould have meant the operating "
+            "point does not exist."
+        )
+    lines.extend([
+        "",
+        f"{'group':<14} {'TAR':>8} {'FAR':>8} {'AUC':>8} {'genuine':>8} {'impostor':>9}",
+        "-" * 60,
+    ])
+    for report in sorted(reports.values(), key=lambda r: r.group):
+        lines.append(
+            f"{report.group:<14} {report.tar:>8.3f} {report.far:>8.3f} "
+            f"{report.auc:>8.4f} {report.genuine_count:>8} {report.impostor_count:>9}"
+        )
+
+    tars = [r.tar for r in reports.values()]
+    fars = [r.far for r in reports.values()]
+    if len(reports) > 1:
+        lines.append("")
+        lines.append(f"TAR spread: {max(tars) - min(tars):.3f}   "
+                     f"FAR spread: {max(fars) - min(fars):.3f}")
+        worst_missed = min(reports.values(), key=lambda r: r.tar)
+        worst_flagged = max(reports.values(), key=lambda r: r.far)
+        if max(tars) - min(tars) > 0.1:
+            lines.append(
+                f"  {worst_missed.group} is MISSED most often "
+                f"({worst_missed.miss_rate:.0%} of the time)."
+            )
+        if max(fars) - min(fars) > 0.01:
+            lines.append(
+                f"  {worst_flagged.group} is FALSELY FLAGGED most often "
+                f"({worst_flagged.far:.1%} of its impostor pairs)."
+            )
+    return lines

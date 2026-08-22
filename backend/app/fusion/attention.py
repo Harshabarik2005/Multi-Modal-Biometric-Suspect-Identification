@@ -263,7 +263,10 @@ class KeylessAttentionFusion(nn.Module):
 
     @classmethod
     def load(cls, path: Path, device: str = "cpu") -> "KeylessAttentionFusion":
-        payload = torch.load(path, map_location=device, weights_only=False)
+        # weights_only=True: a head loaded from disk is data, not code. The
+        # payload is a state dict plus plain ints and strings, all of which the
+        # restricted loader handles.
+        payload = torch.load(path, map_location=device, weights_only=True)
         model = cls(
             dims={Modality(k): v for k, v in payload["dims"].items()},
             shared_dim=payload["shared_dim"],

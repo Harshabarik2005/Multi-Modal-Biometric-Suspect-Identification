@@ -18,7 +18,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -281,14 +281,16 @@ class AlertSettings(BaseModel):
     smtp_host: str = ""
     smtp_port: int = 587
     smtp_username: str = ""
-    smtp_password: str = ""
+    # SecretStr so the value cannot leak through repr(settings) or a pydantic
+    # validation error, both of which print field values verbatim.
+    smtp_password: SecretStr = SecretStr("")
     smtp_sender: str = ""
     smtp_use_tls: bool = True
     #: Comma-separated in config/env; parsed into a list at use.
     smtp_recipients: str = ""
 
     twilio_account_sid: str = ""
-    twilio_auth_token: str = ""
+    twilio_auth_token: SecretStr = SecretStr("")
     twilio_from_number: str = ""
     twilio_to_numbers: str = ""
 
@@ -315,11 +317,26 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="FRS_",
         env_nested_delimiter="__",
-        extra="ignore",
+        # "forbid", not "ignore". With "ignore", FRS_DATABASE_URL was accepted
+        # and silently dropped because no such field existed -- so anyone
+        # following the README to move the watchlist onto Postgres got a local
+        # SQLite file holding the biometric templates and the whole audit
+        # trail, with no error and no warning. A mistyped setting must fail
+        # loudly, not quietly do the insecure thing.
+        extra="forbid",
     )
 
     project_name: str = "Faceless FRS"
     device: Literal["auto", "cuda", "cpu"] = "auto"
+
+    #: SQLAlchemy URL. Defaults to SQLite under the data directory.
+    #: Prefer this over `serve.py --db-url`, which puts the password in the
+    #: process command line where any local user can read it.
+    database_url: str | None = None
+
+    #: Background job workers. One by default: the models contend for the same
+    #: GPU memory, so concurrent scans slow each other and risk running out.
+    job_workers: int = Field(1, ge=1, le=8)
 
     paths: PathSettings = PathSettings()
     detection: DetectionSettings = DetectionSettings()

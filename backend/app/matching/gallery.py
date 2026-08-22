@@ -44,6 +44,31 @@ logger = get_logger(__name__)
 TEMPLATE_KEY_ENV = "FRS_TEMPLATE_ENCRYPTION_KEY"
 _ENCRYPTED_MAGIC = b"FRSENC1:"
 
+#: person_id becomes a directory name under `paths.enrollment_dir`, so it has
+#: to be a safe path component. Must START with an alphanumeric: a plain
+#: charset class still admits ".." and ".", which are traversal components made
+#: entirely of otherwise-permitted characters. No lookahead, because pydantic
+#: v2 validates patterns with the Rust regex crate, which does not support it.
+PERSON_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+
+
+def validate_person_id(person_id: str) -> str:
+    """Return `person_id` if it is a safe path component, else raise.
+
+    Enforced here rather than only at the API boundary, because the CLI writes
+    to the same directories and `scripts/enroll.py --person-id ../../..` would
+    otherwise escape the enrolment root entirely.
+    """
+    import re
+
+    if not re.match(PERSON_ID_PATTERN, person_id or ""):
+        raise ValueError(
+            f"Invalid person_id {person_id!r}. It becomes a directory name, so "
+            "it must start with a letter or digit and contain only letters, "
+            "digits, dots, dashes and underscores (max 64 characters)."
+        )
+    return person_id
+
 
 @dataclass
 class PersonRecord:
@@ -195,12 +220,49 @@ class Gallery:
 
     # -- ranking -----------------------------------------------------------
 
+    @staticmethod
+    def _reference_trust(
+        person: PersonRecord, modality: Modality, half_life_days: float
+    ) -> float:
+        """How far THIS person's reference for THIS modality can still be trusted.
+
+        Only re-ID decays. Face and gait describe the person; re-ID largely
+        describes their clothing, so a three-week-old reference is far weaker
+        evidence than one from this morning.
+
+        Resolved here, per person, rather than passed in by the caller. It used
+        to be a `trusts` parameter, which meant every call site had to remember
+        it -- and the API scan path, the documented primary workflow, did not.
+        Nor did the evaluation harness. Something that must never be forgotten
+        should not be something a caller can omit.
+        """
+        if modality is not Modality.REID or half_life_days <= 0:
+            return 1.0
+        if not person.enrolled_at:
+            return 1.0
+
+        from datetime import datetime, timezone
+
+        try:
+            enrolled = datetime.fromisoformat(person.enrolled_at)
+        except ValueError:
+            return 1.0
+        if enrolled.tzinfo is None:
+            enrolled = enrolled.replace(tzinfo=timezone.utc)
+
+        from app.embeddings.reid import trust_at
+
+        elapsed_days = (
+            datetime.now(timezone.utc) - enrolled
+        ).total_seconds() / 86400.0
+        return trust_at(elapsed_days, half_life_days)
+
     def rank(
         self,
         probes: dict[Modality, ModalityEmbedding],
         strategy=None,
-        trusts: dict[Modality, float] | None = None,
         gait_min_references: int = 3,
+        reid_half_life_days: float = 0.0,
     ) -> list[MatchCandidate]:
         """Score every enrolled person against this track's embeddings.
 
@@ -211,8 +273,12 @@ class Gallery:
         With a `strategy`, `fused_similarity` is the fused calibrated score in
         [0, 1] and `weights` records what drove it. Without one, only the
         per-modality scores are filled in.
+
+        `reid_half_life_days` applies staleness decay to each person's own
+        re-ID reference. Pass `settings.reid.trust_half_life_days`; 0 disables
+        it. It is resolved per person here rather than supplied by the caller,
+        because when it was the caller's job two of the three call sites forgot.
         """
-        trusts = trusts or {}
         gait_mean = (
             self.gait_population_mean(gait_min_references)
             if Modality.GAIT in probes
@@ -246,7 +312,9 @@ class Gallery:
                             modality=modality,
                             similarity=score.similarity,
                             quality=score.probe_quality,
-                            trust=trusts.get(modality, 1.0),
+                            trust=self._reference_trust(
+                                person, modality, reid_half_life_days
+                            ),
                         )
                         for modality, score in candidate.scores.items()
                     ]
@@ -395,7 +463,7 @@ class GalleryStore:
     # -- persistence -------------------------------------------------------
 
     def person_dir(self, person_id: str) -> Path:
-        return self.root / person_id
+        return self.root / validate_person_id(person_id)
 
     def save(self, person: PersonRecord) -> Path:
         directory = self.person_dir(person.person_id)

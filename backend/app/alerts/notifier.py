@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import smtplib
+import ssl
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from email.message import EmailMessage
@@ -163,6 +164,15 @@ class SMTPNotifier(Notifier):
             raise ValueError("SMTP host is required.")
         if not recipients:
             raise ValueError("At least one recipient is required.")
+        if not use_tls:
+            # Refused rather than warned. The payload is a confirmed
+            # identification of a named person at a place and time; sending it
+            # in the clear is not a trade-off worth offering behind a flag.
+            raise ValueError(
+                "Refusing to send alerts over unencrypted SMTP. An alert names "
+                "an identified person, a camera and a time. Set "
+                "alerts.smtp_use_tls true, or use a transport that encrypts."
+            )
         self.host = host
         self.port = port
         self.username = username
@@ -182,7 +192,13 @@ class SMTPNotifier(Notifier):
         try:
             with smtplib.SMTP(self.host, self.port, timeout=self.timeout) as server:
                 if self.use_tls:
-                    server.starttls()
+                    # An explicit default context. Bare starttls() uses
+                    # ssl._create_stdlib_context(), which sets
+                    # check_hostname=False and verify_mode=CERT_NONE -- so the
+                    # credentials sent on the next line, and an alert body
+                    # naming a person, camera and time, travel over a channel
+                    # any on-path attacker can terminate.
+                    server.starttls(context=ssl.create_default_context())
                 if self.username:
                     server.login(self.username, self.password)
                 server.send_message(message)

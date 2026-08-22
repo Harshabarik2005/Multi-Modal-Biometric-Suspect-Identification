@@ -70,6 +70,20 @@ class MediaSummary:
     #: True when at least one video contributed, so gait is even conceivable.
     has_motion_source: bool = False
 
+    #: Observations that came from video rather than photographs. Gait must be
+    #: judged on this, never on `observations`: counting photographs toward a
+    #: frame requirement made 20 photos plus a 5-frame video report "gait
+    #: ready: 25 continuous frames", which is exactly the mistake the readiness
+    #: check exists to prevent.
+    video_observations: int = 0
+    #: Longest run of consecutive frames from a SINGLE video. Gait reads a
+    #: sequence, and two clips concatenated are not one -- the cadence and GEI
+    #: would be computed across the join between separate recordings.
+    longest_video_run: int = 0
+    #: Index range of that run within the returned observations, so callers can
+    #: hand gait a genuinely contiguous sequence.
+    gait_segment: tuple[int, int] = (0, 0)
+
 
 def observations_from_images(
     paths: list[Path], settings: Settings, detector: YOLOPersonDetector | None = None
@@ -124,6 +138,16 @@ def observations_from_images(
     return observations, summary
 
 
+#: Enrolment keeps far more frames per track than live matching, but not an
+#: unbounded number. The original code lifted the cap to 100,000, which with a
+#: 500MB upload allowance is tens of thousands of 256px crops in RAM -- exactly
+#: the exhaustion `track_buffer.py` exists to prevent, disabled on the one path
+#: that takes untrusted input. 600 frames is 24 seconds at 25fps, ample for a
+#: reference, and bounded.
+ENROLMENT_MAX_OBSERVATIONS = 600
+ENROLMENT_MAX_TRACKS = 20
+
+
 def observations_from_video(
     path: Path, settings: Settings, pipeline: DetectionTrackingPipeline | None = None
 ) -> tuple[list[TrackObservation], MediaSummary]:
@@ -136,21 +160,23 @@ def observations_from_video(
     """
     summary = MediaSummary(videos=1, has_motion_source=True)
 
-    previous_cap = settings.track_buffer.max_observations
-    previous_tracks = settings.track_buffer.max_tracks
-    # Enrollment wants every usable frame, not a rolling window.
-    settings.track_buffer.max_observations = 100_000
-    settings.track_buffer.max_tracks = 100
+    # Build an explicit buffer config rather than mutating `settings`. The
+    # settings object is a process-wide singleton (`get_settings` is cached),
+    # and `TrackBufferStore` holds a live reference to it -- so temporarily
+    # rewriting it here changed the eviction bounds of any scan running
+    # concurrently, then changed them back underneath it.
+    buffer_config = settings.track_buffer.model_copy(
+        update={
+            "max_observations": ENROLMENT_MAX_OBSERVATIONS,
+            "max_tracks": ENROLMENT_MAX_TRACKS,
+        }
+    )
 
-    try:
-        pipeline = pipeline or DetectionTrackingPipeline(settings)
-        store = TrackBufferStore(settings)
-        for result, frame in pipeline.stream(path):
-            store.update(result, frame)
-            summary.frames_seen += 1
-    finally:
-        settings.track_buffer.max_observations = previous_cap
-        settings.track_buffer.max_tracks = previous_tracks
+    pipeline = pipeline or DetectionTrackingPipeline(settings)
+    store = TrackBufferStore(settings, config=buffer_config)
+    for result, frame in pipeline.stream(path):
+        store.update(result, frame)
+        summary.frames_seen += 1
 
     buffers = sorted(store, key=lambda b: len(b), reverse=True)
     summary.tracks_found = len(buffers)
@@ -163,6 +189,9 @@ def observations_from_video(
 
     observations = list(buffers[0])
     summary.observations = len(observations)
+    summary.video_observations = len(observations)
+    summary.longest_video_run = len(observations)
+    summary.gait_segment = (0, len(observations))
     return observations, summary
 
 
@@ -188,9 +217,27 @@ def observations_from_uploads(
 
     for path in videos:
         video_observations, summary = observations_from_video(path, settings)
+
+        # Renumber onto the end of what came before. Each video's frame indices
+        # start at 0, so concatenating them raw produced [0,1,2,3,0,1,2,3] --
+        # not monotonic, despite this function's docstring promising it was.
+        offset = (observations[-1].frame_index + 1) if observations else 0
+        start = len(observations)
+        for index, observation in enumerate(video_observations):
+            observation.frame_index = offset + index
+            observation.timestamp_s = float(offset + index)
         observations.extend(video_observations)
+
+        # Track the longest single-video run, and where it sits. Gait reads a
+        # sequence; a run spanning two recordings, potentially at different
+        # frame rates and of different people, is not one.
+        if len(video_observations) > combined.longest_video_run:
+            combined.longest_video_run = len(video_observations)
+            combined.gait_segment = (start, start + len(video_observations))
+
         combined.videos += summary.videos
         combined.frames_seen += summary.frames_seen
+        combined.video_observations += len(video_observations)
         combined.tracks_found = max(combined.tracks_found, summary.tracks_found)
         combined.rejected.extend(summary.rejected)
         combined.has_motion_source = combined.has_motion_source or summary.has_motion_source
@@ -208,6 +255,19 @@ def observations_from_uploads(
 
     combined.observations = len(observations)
     return observations, combined
+
+
+def gait_observations(
+    observations: list[TrackObservation], summary: MediaSummary
+) -> list[TrackObservation]:
+    """The subset of `observations` gait may legitimately read.
+
+    One contiguous run from a single video. Photographs are excluded because
+    they carry no gait, and separate videos are not spliced together because
+    the cadence would be computed across the join.
+    """
+    start, end = summary.gait_segment
+    return observations[start:end] if end > start else []
 
 
 @dataclass
@@ -250,16 +310,26 @@ def assess_readiness(
         )
     )
 
-    gait_ready = summary.has_motion_source and summary.observations >= minimum_gait
+    # Judged on the longest single-video run, never on total observations.
+    # Counting photographs here reported "gait ready" for an upload of 20
+    # photos and a 5-frame clip -- the precise failure this check exists to
+    # catch, in the check built to catch it.
+    usable_gait_frames = summary.longest_video_run
+    gait_ready = summary.has_motion_source and usable_gait_frames >= minimum_gait
+
     if not summary.has_motion_source:
         gait_reason = "photos only -- a still image contains no gait information"
-    elif summary.observations < minimum_gait:
+    elif usable_gait_frames < minimum_gait:
         gait_reason = (
-            f"only {summary.observations} frames; gait needs at least "
-            f"{minimum_gait} of continuous walking"
+            f"the longest single clip gave {usable_gait_frames} tracked frames; "
+            f"gait needs at least {minimum_gait} of continuous walking"
         )
+        if summary.images:
+            gait_reason += " (photographs do not count toward this)"
     else:
-        gait_reason = f"{summary.observations} continuous frames available"
+        gait_reason = (
+            f"{usable_gait_frames} continuous frames from one clip"
+        )
 
     checks.append(
         ModalityReadiness(

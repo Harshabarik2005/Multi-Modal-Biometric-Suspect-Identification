@@ -40,38 +40,6 @@ from app.pipeline import DetectionTrackingPipeline  # noqa: E402
 logger = get_logger(__name__)
 
 
-def reid_trusts(gallery, settings) -> dict[Modality, float]:
-    """How far each modality's stored reference can still be trusted.
-
-    Only re-ID decays. Face and gait describe the person; re-ID largely
-    describes their clothing, so an old reference is far weaker evidence. The
-    oldest enrolment in the gallery sets the decay conservatively, since one
-    trust value covers the whole ranking pass.
-    """
-    from datetime import datetime, timezone
-
-    from app.embeddings.reid import trust_at
-
-    half_life = settings.reid.trust_half_life_days
-    if half_life <= 0:
-        return {}
-
-    oldest_days = 0.0
-    now = datetime.now(timezone.utc)
-    for person in gallery:
-        if not person.enrolled_at:
-            continue
-        try:
-            enrolled = datetime.fromisoformat(person.enrolled_at)
-        except ValueError:
-            continue
-        if enrolled.tzinfo is None:
-            enrolled = enrolled.replace(tzinfo=timezone.utc)
-        oldest_days = max(oldest_days, (now - enrolled).total_seconds() / 86400.0)
-
-    return {Modality.REID: trust_at(oldest_days, half_life)}
-
-
 @dataclass
 class TrackVerdict:
     """The best result seen for one track over the whole clip."""
@@ -294,8 +262,8 @@ def run(args: argparse.Namespace) -> int:
             candidates: list[MatchCandidate] = gallery.rank(
                 probes,
                 strategy=strategy,
-                trusts=reid_trusts(gallery, settings),
                 gait_min_references=settings.fusion.gait_min_references_for_centring,
+                reid_half_life_days=settings.reid.trust_half_life_days,
             )
             if not candidates:
                 continue

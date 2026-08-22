@@ -33,6 +33,7 @@ from sqlalchemy.orm import Session
 from app.api.jobs import Job, JobRunner, ProgressReporter
 from app.api.media import (
     assess_readiness,
+    gait_observations,
     kind_of,
     observations_from_uploads,
 )
@@ -47,6 +48,10 @@ router = APIRouter()
 # Guard against a mis-click uploading a 10GB file and filling the disk.
 MAX_UPLOAD_BYTES = 500 * 1024 * 1024
 MAX_FILES = 60
+
+#: Imported rather than redefined, so the API and the file-backed gallery
+#: cannot drift apart on what counts as a safe id.
+from app.matching.gallery import PERSON_ID_PATTERN  # noqa: E402
 
 
 def get_session() -> Session:  # pragma: no cover - replaced by the app factory
@@ -195,10 +200,13 @@ async def preview_enrollment(
 async def enroll(
     runner: Runner,
     settings: AppSettings,
-    person_id: str = Form(..., min_length=1, max_length=64),
+    # Constrained to a safe filename charset, not just a length. The
+    # file-backed gallery uses person_id as a directory name, so "../.." or an
+    # absolute path escapes the enrolment root entirely.
+    person_id: str = Form(..., pattern=PERSON_ID_PATTERN),
     display_name: str = Form(..., min_length=1, max_length=200),
-    notes: str = Form(""),
-    operator: str = Form("unknown"),
+    notes: str = Form("", max_length=2000),
+    operator: str = Form("unknown", max_length=120),
     replace: bool = Form(False),
     files: list[UploadFile] = File(...),
 ) -> JobOut:
@@ -239,10 +247,14 @@ async def enroll(
                 })
 
             reporter.stage("reading gait")
-            if summary.has_motion_source:
+            # Only the contiguous run from one video. Passing the whole list
+            # would have gait read a cadence across the join between separate
+            # recordings, and across photographs that have no cadence at all.
+            gait_frames = gait_observations(observations, summary)
+            if summary.has_motion_source and gait_frames:
                 from app.embeddings.gait import GaitEmbedder
 
-                gait = GaitEmbedder(settings).embed_reference(observations)
+                gait = GaitEmbedder(settings).embed_reference(gait_frames)
                 if gait.has_signal:
                     embeddings[Modality.GAIT] = gait
                     stored.append("gait")
@@ -315,8 +327,10 @@ async def enroll(
 async def scan(
     runner: Runner,
     settings: AppSettings,
-    camera_id: str = Form(""),
-    threshold: float = Form(-1.0),
+    camera_id: str = Form("", max_length=64),
+    # Bounded. Unbounded, a single request could set this to 0 and make every
+    # subsequent scan match everyone.
+    threshold: float = Form(-1.0, ge=-1.0, le=1.0),
     record: bool = Form(True),
     files: list[UploadFile] = File(...),
 ) -> JobOut:
@@ -346,8 +360,14 @@ async def scan(
                     "The watchlist is empty -- enrol someone before scanning."
                 )
 
+            # Work on a private copy. `get_settings()` is lru_cached and hands
+            # every caller the SAME mutable object, so assigning to
+            # `settings.fusion.threshold` here rewrote the match threshold for
+            # the entire process and never restored it -- one request with a
+            # low threshold made every later scan match everyone.
+            job_settings = settings.model_copy(deep=True)
             if threshold >= 0:
-                settings.fusion.threshold = threshold
+                job_settings.fusion.threshold = threshold
 
             job.message = f"scanning against {len(gallery)} enrolled"
             from app.api.scanning import scan_video
@@ -359,7 +379,7 @@ async def scan(
                         video,
                         gallery,
                         repo if record else None,
-                        settings,
+                        job_settings,
                         camera_id=camera_id,
                         job=job,
                         video_index=index,
@@ -373,7 +393,7 @@ async def scan(
             return {
                 "camera_id": camera_id,
                 "videos": [v.name for v in videos],
-                "threshold": settings.fusion.threshold,
+                "threshold": job_settings.fusion.threshold,
                 "recorded": record,
                 "findings": findings,
                 "scanned_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -400,4 +420,18 @@ def job_status(job_id: str, runner: Runner) -> JobOut:
 
 @router.get("/jobs", response_model=list[JobOut], tags=["jobs"])
 def recent_jobs(runner: Runner, kind: str | None = None, limit: int = 25) -> list[JobOut]:
-    return [JobOut(**job.to_dict()) for job in runner.recent(limit=limit, kind=kind)]
+    """Recent jobs, WITHOUT their results.
+
+    The result payload of a scan lists everyone it found -- names, cameras,
+    timestamps, scores. Returning that from a listing route hands the whole
+    recent history to anyone who asks. Fetch a specific job by id to see its
+    result; the id is only known to whoever started it.
+    """
+    listed = []
+    for job in runner.recent(limit=limit, kind=kind):
+        summary = job.to_dict()
+        summary["result"] = None
+        # Exception text carries temp paths, model paths and database messages.
+        summary["error"] = "failed" if summary["error"] else ""
+        listed.append(JobOut(**summary))
+    return listed

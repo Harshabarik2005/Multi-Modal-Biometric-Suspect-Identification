@@ -166,9 +166,12 @@ class TestReadiness:
 
     def test_video_with_enough_frames_supports_all_three(self) -> None:
         settings = get_settings()
+        frames = settings.gait.min_frames + 10
         summary = MediaSummary(
             videos=1,
-            observations=settings.gait.min_frames + 10,
+            observations=frames,
+            video_observations=frames,
+            longest_video_run=frames,
             has_motion_source=True,
         )
         checks = {c.modality: c for c in assess_readiness(summary, settings)}
@@ -176,10 +179,56 @@ class TestReadiness:
 
     def test_a_very_short_video_cannot_support_gait(self) -> None:
         settings = get_settings()
-        summary = MediaSummary(videos=1, observations=5, has_motion_source=True)
+        summary = MediaSummary(
+            videos=1,
+            observations=5,
+            video_observations=5,
+            longest_video_run=5,
+            has_motion_source=True,
+        )
         checks = {c.modality: c for c in assess_readiness(summary, settings)}
         assert not checks[Modality.GAIT].ready
         assert str(settings.gait.min_frames) in checks[Modality.GAIT].reason
+
+    def test_photographs_do_not_count_toward_gait(self) -> None:
+        """Regression, LOG-04.
+
+        Gait was gated on total observations, so 20 photographs plus a 5-frame
+        clip reported "gait ready: 25 continuous frames available" -- the exact
+        failure this readiness check exists to prevent, in the check built to
+        prevent it.
+        """
+        settings = get_settings()
+        summary = MediaSummary(
+            videos=1,
+            images=20,
+            observations=25,
+            video_observations=5,
+            longest_video_run=5,
+            has_motion_source=True,
+        )
+        checks = {c.modality: c for c in assess_readiness(summary, settings)}
+
+        assert not checks[Modality.GAIT].ready
+        assert "photographs do not count" in checks[Modality.GAIT].reason
+        # Face and appearance legitimately use the photos.
+        assert checks[Modality.FACE].ready
+        assert checks[Modality.REID].ready
+
+    def test_gait_is_judged_on_one_clip_not_the_total(self) -> None:
+        """Two short clips do not add up to one long walk."""
+        settings = get_settings()
+        half = settings.gait.min_frames // 2
+        summary = MediaSummary(
+            videos=2,
+            observations=half * 2,
+            video_observations=half * 2,
+            longest_video_run=half,  # neither clip alone is long enough
+            has_motion_source=True,
+        )
+        checks = {c.modality: c for c in assess_readiness(summary, settings)}
+        assert not checks[Modality.GAIT].ready
+        assert "longest single clip" in checks[Modality.GAIT].reason
 
     def test_nothing_found_makes_everything_unready(self) -> None:
         checks = assess_readiness(MediaSummary(), get_settings())
@@ -342,3 +391,99 @@ class TestUploadFlow:
 
         after = set(Path(tempfile.gettempdir()).glob("frs-upload-*"))
         assert not (after - before), "upload directory was not cleaned up"
+
+
+class TestMultipleVideos:
+    """Regression, LOG-05: separate recordings are not one continuous walk."""
+
+    def _clip(self, directory: Path, name: str, frames: int = 4):
+        import cv2
+        import numpy as np
+
+        path = directory / name
+        writer = cv2.VideoWriter(
+            str(path), cv2.VideoWriter_fourcc(*"mp4v"), 10.0, (160, 120)
+        )
+        for index in range(frames):
+            frame = np.zeros((120, 160, 3), dtype=np.uint8)
+            cv2.rectangle(frame, (10 + index, 20), (60 + index, 100), (200, 200, 200), -1)
+            writer.write(frame)
+        writer.release()
+        return path
+
+    def test_frame_indices_stay_monotonic_across_videos(self, tmp_path) -> None:
+        """Each video's indices start at 0, so raw concatenation gave
+        [0,1,2,3,0,1,2,3] -- not monotonic, despite the docstring saying it was.
+        """
+        from unittest.mock import patch
+
+        from app.api.media import MediaSummary, observations_from_uploads
+        from app.core.types import TrackObservation
+
+        import numpy as np
+
+        def fake_video(path, settings, pipeline=None):
+            observations = [
+                TrackObservation(i, float(i), np.zeros((40, 20, 3), np.uint8), 40.0, 0.9)
+                for i in range(4)
+            ]
+            summary = MediaSummary(
+                videos=1,
+                observations=4,
+                video_observations=4,
+                longest_video_run=4,
+                has_motion_source=True,
+            )
+            return observations, summary
+
+        paths = [self._clip(tmp_path, "a.mp4"), self._clip(tmp_path, "b.mp4")]
+        with patch("app.api.media.observations_from_video", side_effect=fake_video):
+            observations, summary = observations_from_uploads(paths, get_settings())
+
+        indices = [o.frame_index for o in observations]
+        assert indices == sorted(indices), f"not monotonic: {indices}"
+        assert len(set(indices)) == len(indices), f"duplicate indices: {indices}"
+
+    def test_gait_gets_one_clip_not_the_concatenation(self, tmp_path) -> None:
+        from unittest.mock import patch
+
+        import numpy as np
+
+        from app.api.media import (
+            MediaSummary,
+            gait_observations,
+            observations_from_uploads,
+        )
+        from app.core.types import TrackObservation
+
+        lengths = iter([6, 3])
+
+        def fake_video(path, settings, pipeline=None):
+            count = next(lengths)
+            observations = [
+                TrackObservation(i, float(i), np.zeros((40, 20, 3), np.uint8), 40.0, 0.9)
+                for i in range(count)
+            ]
+            return observations, MediaSummary(
+                videos=1,
+                observations=count,
+                video_observations=count,
+                longest_video_run=count,
+                has_motion_source=True,
+            )
+
+        paths = [self._clip(tmp_path, "a.mp4"), self._clip(tmp_path, "b.mp4")]
+        with patch("app.api.media.observations_from_video", side_effect=fake_video):
+            observations, summary = observations_from_uploads(paths, get_settings())
+
+        assert len(observations) == 9
+        # Gait sees only the longer clip, not the splice.
+        segment = gait_observations(observations, summary)
+        assert len(segment) == 6
+        assert summary.longest_video_run == 6
+
+    def test_gait_segment_is_empty_for_photos_only(self) -> None:
+        from app.api.media import MediaSummary, gait_observations
+
+        summary = MediaSummary(images=5, observations=5)
+        assert gait_observations([1, 2, 3, 4, 5], summary) == []

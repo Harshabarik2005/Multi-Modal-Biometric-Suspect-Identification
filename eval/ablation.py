@@ -78,7 +78,17 @@ class Pair:
 
     @property
     def group(self) -> str:
-        return self.a.group or self.b.group
+        """The group this pair belongs to, or "" when it spans two.
+
+        Cross-group impostor pairs are the majority of impostor pairs in any
+        multi-group set. Attributing them to whichever side happened to be
+        first measured each group's false-accept rate on a mislabelled
+        population, so they are now excluded from per-group figures rather than
+        arbitrarily assigned.
+        """
+        if self.a.group == self.b.group:
+            return self.a.group
+        return ""
 
 
 @dataclass
@@ -112,6 +122,17 @@ class AblationResult:
     rows: list[AblationRow] = field(default_factory=list)
     headline_far: float = 0.001
 
+    @property
+    def comparable(self) -> bool:
+        """Whether every scored row saw the same population.
+
+        Only then can their AUCs be ranked against each other. A row scoring
+        only the pairs where its modality was visible has been graded on the
+        easy cases.
+        """
+        coverage = [r.coverage for r in self.rows if r.report is not None]
+        return bool(coverage) and (max(coverage) - min(coverage)) <= 0.01
+
     def best(self) -> AblationRow | None:
         scored = [r for r in self.rows if r.report is not None]
         return max(scored, key=lambda r: r.auc) if scored else None
@@ -139,7 +160,7 @@ class AblationResult:
 
         if note_coverage:
             spread = [r.coverage for r in self.rows if r.report is not None]
-            if spread and (max(spread) - min(spread)) > 0.1:
+            if spread and (max(spread) - min(spread)) > 0.01:
                 lines.append("")
                 lines.append(
                     "Coverage differs between rows, so these AUCs are NOT directly\n"
@@ -148,21 +169,36 @@ class AblationResult:
                     "common-subset table below for the like-for-like comparison."
                 )
 
-        winner = self.best()
-        if winner:
-            lines.append("")
-            lines.append(f"Best by AUC: {winner.name} ({winner.auc:.4f})")
+        # A verdict is only printed when the rows are actually comparable.
+        # This used to print "Best by AUC" and the attention delta directly
+        # beneath the warning saying these AUCs are NOT comparable -- so the
+        # project's central claim took its verdict from the comparison this
+        # module documents as invalid.
+        if self.comparable:
+            winner = self.best()
+            if winner:
+                lines.append("")
+                lines.append(f"Best by AUC: {winner.name} ({winner.auc:.4f})")
 
-            attention = self.row("attention")
-            quality = self.row("fusion:quality_weighted")
-            if attention and quality and attention.report and quality.report:
-                delta = attention.auc - quality.auc
-                verdict = (
-                    "attention beats the strongest fixed rule"
-                    if delta > 0
-                    else "attention does NOT beat the strongest fixed rule"
-                )
-                lines.append(f"attention - quality_weighted = {delta:+.4f}  ({verdict})")
+                attention = self.row("attention")
+                quality = self.row("fusion:quality_weighted")
+                if attention and quality and attention.report and quality.report:
+                    delta = attention.auc - quality.auc
+                    verdict = (
+                        "attention beats the strongest fixed rule"
+                        if delta > 0
+                        else "attention does NOT beat the strongest fixed rule"
+                    )
+                    lines.append(
+                        f"attention - quality_weighted = {delta:+.4f}  ({verdict})"
+                    )
+        else:
+            lines.append("")
+            lines.append(
+                "No winner declared: coverage differs between rows, so ranking\n"
+                "them by AUC would compare results measured on different\n"
+                "populations. See the common-subset table for the verdict."
+            )
         return "\n".join(lines)
 
 
@@ -194,8 +230,16 @@ def score_fusion(
     pairs: list[Pair],
     strategy_name: str,
     calibrations: dict[Modality, ModalityCalibration],
+    reid_trust: float = 1.0,
 ):
-    """Genuine/impostor scores using one of the Phase-5 fixed rules."""
+    """Genuine/impostor scores using one of the Phase-5 fixed rules.
+
+    `reid_trust` mirrors the staleness decay the matcher applies to stored
+    re-ID references. It defaults to 1.0 because evaluation pairs are usually
+    contemporaneous, but it has to be expressible: with it hardcoded, the
+    harness measured a `quality_weighted` the deployed matcher does not
+    compute, which is the one thing an ablation must not do.
+    """
     strategy = build_strategy(strategy_name, calibrations)
     genuine, impostor, skipped = [], [], 0
 
@@ -212,7 +256,14 @@ def score_fusion(
                 )
             else:
                 similarity, quality = None, 0.0
-            inputs.append(FusionInput(modality, similarity, quality))
+            inputs.append(
+                FusionInput(
+                    modality,
+                    similarity,
+                    quality,
+                    trust=reid_trust if modality is Modality.REID else 1.0,
+                )
+            )
 
         result = strategy.fuse(inputs)
         if not result.weights:

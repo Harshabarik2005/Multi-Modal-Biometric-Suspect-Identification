@@ -119,6 +119,7 @@ def scan_video(
                 probes,
                 strategy=strategy,
                 gait_min_references=settings.fusion.gait_min_references_for_centring,
+                reid_half_life_days=settings.reid.trust_half_life_days,
             )
             if not candidates:
                 continue

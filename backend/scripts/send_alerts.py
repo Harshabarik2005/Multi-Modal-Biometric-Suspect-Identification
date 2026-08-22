@@ -56,7 +56,7 @@ def build_notifier(settings, transport: str):
             host=cfg.smtp_host,
             port=cfg.smtp_port,
             username=cfg.smtp_username,
-            password=cfg.smtp_password,
+            password=cfg.smtp_password.get_secret_value(),
             sender=cfg.smtp_sender,
             recipients=recipients,
             use_tls=cfg.smtp_use_tls,
@@ -64,14 +64,18 @@ def build_notifier(settings, transport: str):
 
     if transport == "twilio":
         numbers = cfg.split(cfg.twilio_to_numbers)
-        if not (cfg.twilio_account_sid and cfg.twilio_auth_token and numbers):
+        if not (
+            cfg.twilio_account_sid
+            and cfg.twilio_auth_token.get_secret_value()
+            and numbers
+        ):
             raise SystemExit(
                 "Twilio is not configured. Set alerts.twilio_account_sid,\n"
                 "twilio_auth_token, twilio_from_number and twilio_to_numbers."
             )
         return TwilioNotifier(
             account_sid=cfg.twilio_account_sid,
-            auth_token=cfg.twilio_auth_token,
+            auth_token=cfg.twilio_auth_token.get_secret_value(),
             from_number=cfg.twilio_from_number,
             to_numbers=numbers,
             console_url=cfg.console_url,

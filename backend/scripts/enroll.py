@@ -62,6 +62,16 @@ def enroll(args: argparse.Namespace) -> int:
     settings = get_settings(args.config)
     setup_logging(settings.logging.level)
 
+    # Checked before any work happens: person_id becomes a directory name, and
+    # "--person-id ../../.." would write outside the enrolment root.
+    from app.matching.gallery import validate_person_id
+
+    try:
+        validate_person_id(args.person_id)
+    except ValueError as exc:
+        print(exc)
+        return 2
+
     tracks = collect_observations(settings, args.source)
     if not tracks:
         print(

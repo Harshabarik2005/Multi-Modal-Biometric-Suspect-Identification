@@ -201,28 +201,83 @@ class TestPairwiseScores:
 
 
 class TestFairness:
-    def test_reports_each_group_separately(self) -> None:
-        """An aggregate number hides a group the system fails for."""
-        rng = np.random.default_rng(7)
-        # Group B is deliberately harder.
-        genuine = np.concatenate([rng.normal(1.5, 0.3, 100), rng.normal(0.6, 0.3, 100)])
-        impostor = np.concatenate([rng.normal(0, 0.3, 200), rng.normal(0, 0.3, 200)])
-        genuine_groups = np.array(["A"] * 100 + ["B"] * 100)
-        impostor_groups = np.array(["A"] * 200 + ["B"] * 200)
+    def _two_groups(self, seed: int = 7):
+        """Group B is genuinely harder to recognise than group A."""
+        rng = np.random.default_rng(seed)
+        genuine = np.concatenate(
+            [rng.normal(1.5, 0.3, 200), rng.normal(0.6, 0.3, 200)]
+        )
+        impostor = np.concatenate(
+            [rng.normal(0, 0.3, 400), rng.normal(0, 0.3, 400)]
+        )
+        return (
+            genuine,
+            impostor,
+            np.array(["A"] * 200 + ["B"] * 200),
+            np.array(["A"] * 400 + ["B"] * 400),
+        )
 
-        reports = fairness_breakdown(
-            genuine, impostor, genuine_groups, impostor_groups
-        )
+    def test_every_group_is_judged_at_the_same_threshold(self) -> None:
+        """Regression, LOG-01.
+
+        Each group used to be scored at a threshold derived from its OWN
+        impostor distribution -- an operating point no deployment uses. A
+        deployment picks one threshold and everyone is judged against it.
+        """
+        reports = fairness_breakdown(*self._two_groups())
+        thresholds = {report.threshold for report in reports.values()}
+        assert len(thresholds) == 1, f"groups judged at different points: {thresholds}"
+
+    def test_surfaces_the_group_that_is_missed(self) -> None:
+        """The per-group threshold hid this, and inverted which group looked bad."""
+        reports = fairness_breakdown(*self._two_groups())
         assert set(reports) == {"A", "B"}
-        assert reports["A"].auc > reports["B"].auc, (
-            "the harness must surface that one group performs worse"
+        assert reports["B"].tar < reports["A"].tar
+        assert reports["B"].miss_rate > 0.3, (
+            "the harder group is missed often, and the report must show it"
         )
+
+    def test_reports_both_tar_and_far_per_group(self) -> None:
+        """Being missed and being falsely flagged are different harms.
+
+        Reporting only one hides half the problem.
+        """
+        for report in fairness_breakdown(*self._two_groups()).values():
+            assert 0.0 <= report.tar <= 1.0
+            assert 0.0 <= report.far <= 1.0
+            assert report.genuine_count > 0 and report.impostor_count > 0
+
+    def test_summary_names_the_disadvantaged_group(self) -> None:
+        from eval.metrics import fairness_summary
+
+        text = "\n".join(fairness_summary(fairness_breakdown(*self._two_groups())))
+        assert "SAME threshold" in text
+        assert "TAR spread" in text
+        assert "B is MISSED" in text
 
     def test_mismatched_lengths_are_rejected(self) -> None:
         with pytest.raises(ValueError):
             fairness_breakdown(
                 np.array([1.0, 2.0]), np.array([0.0]), np.array(["A"]), np.array(["A"])
             )
+
+
+class TestUnresolvableFAR:
+    def test_flags_operating_points_the_sample_cannot_measure(self) -> None:
+        """Regression, LOG-11.
+
+        The guard was `report.tar_at_far[far] = report.tar_at_far.get(far, 0.0)`
+        -- a self-assignment that changed nothing, so a FAR finer than the
+        impostor set could resolve was reported as though it were real.
+        """
+        rng = np.random.default_rng(11)
+        report = evaluate_verification(
+            rng.normal(1, 0.3, 50), rng.normal(0, 0.3, 50), fars=(0.1, 0.0001)
+        )
+        assert report.smallest_resolvable_far == pytest.approx(0.02)
+        assert 0.0001 in report.unresolvable_fars
+        assert 0.1 not in report.unresolvable_fars
+        assert "below resolution" in "\n".join(report.summary_lines())
 
 
 def observation(label: str, modalities: dict[Modality, float], seed: int = 0):
@@ -387,3 +442,102 @@ class TestAblation:
         genuine, _, _ = score_fusion(pairs, "quality_weighted", self._calibrations())
         assert genuine.size == 1
         assert 0.0 <= genuine[0] <= 1.0
+
+
+class TestVerdictOnlyWhenComparable:
+    """Regression, LOG-02.
+
+    `table()` printed "these AUCs are NOT directly comparable" and then, in the
+    same output, "Best by AUC" -- so the project's central claim took its
+    verdict from the comparison the module documents as invalid.
+    """
+
+    def _calibrations(self):
+        return {
+            m: ModalityCalibration(m, 0.0, 1.0)
+            for m in (Modality.FACE, Modality.GAIT, Modality.REID)
+        }
+
+    def _mixed_coverage_pairs(self):
+        pairs = []
+        for index in range(8):
+            label = f"p{index // 2}"
+            # Face present on only some pairs -> unequal coverage between rows.
+            modalities = (
+                {Modality.FACE: 0.1, Modality.REID: 0.6}
+                if index % 2 == 0
+                else {Modality.REID: 0.6}
+            )
+            pairs.append(
+                Pair(
+                    observation(label, modalities, seed=index),
+                    observation(label, modalities, seed=index + 40),
+                    True,
+                )
+            )
+        for index in range(8):
+            modalities = (
+                {Modality.FACE: 0.1, Modality.REID: 0.6}
+                if index % 2 == 0
+                else {Modality.REID: 0.6}
+            )
+            pairs.append(
+                Pair(
+                    observation(f"x{index}", modalities),
+                    observation(f"y{index}", modalities),
+                    False,
+                )
+            )
+        return pairs
+
+    def test_no_winner_declared_when_coverage_differs(self) -> None:
+        result = run_ablation(self._mixed_coverage_pairs(), self._calibrations())
+        assert not result.comparable
+        text = result.table()
+        assert "No winner declared" in text
+        assert "Best by AUC" not in text
+
+    def test_winner_declared_on_the_common_subset(self) -> None:
+        pairs = []
+        for index in range(8):
+            label = f"p{index // 2}"
+            everything = {m: 0.3 for m in Modality}
+            pairs.append(
+                Pair(
+                    observation(label, everything, seed=index),
+                    observation(label, everything, seed=index + 40),
+                    True,
+                )
+            )
+        for index in range(8):
+            everything = {m: 0.3 for m in Modality}
+            pairs.append(
+                Pair(
+                    observation(f"x{index}", everything),
+                    observation(f"y{index}", everything),
+                    False,
+                )
+            )
+
+        result = run_ablation(common_subset(pairs), self._calibrations())
+        assert result.comparable
+        assert "Best by AUC" in result.table()
+
+
+class TestCrossGroupPairs:
+    """Regression, LOG-13: a pair spanning two groups belongs to neither."""
+
+    def test_same_group_pair_keeps_its_group(self) -> None:
+        a = observation("a", {Modality.FACE: 0.2})
+        b = observation("b", {Modality.FACE: 0.2})
+        a.group = b.group = "group-1"
+        assert Pair(a, b, False).group == "group-1"
+
+    def test_cross_group_pair_is_unattributed(self) -> None:
+        a = observation("a", {Modality.FACE: 0.2})
+        b = observation("b", {Modality.FACE: 0.2})
+        a.group, b.group = "group-1", "group-2"
+        assert Pair(a, b, False).group == "", (
+            "attributing it to one side measures that group's FAR on a "
+            "mislabelled population"
+        )

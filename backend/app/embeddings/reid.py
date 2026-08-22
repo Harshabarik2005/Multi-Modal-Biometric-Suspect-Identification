@@ -101,7 +101,13 @@ class ReIDEmbedder(PerFrameBranch):
         if not path.is_file():
             self._download_weights(path)
 
-        state = self.torch.load(path, map_location="cpu", weights_only=False)
+        # weights_only=True. These checkpoints are downloaded over the network
+        # from Google Drive with no signature and no checksum, and pickle
+        # deserialisation executes arbitrary code -- so anything able to
+        # substitute the Drive object, or write into models_dir, would get code
+        # execution as the server user. These are plain state dicts, so the
+        # restricted loader reads them unchanged.
+        state = self.torch.load(path, map_location="cpu", weights_only=True)
         state = state.get("state_dict", state)
 
         # Checkpoints saved from DataParallel carry a "module." prefix.
@@ -157,6 +163,19 @@ class ReIDEmbedder(PerFrameBranch):
                 f"Weight download reported success but {path} is missing. Google "
                 "Drive quota errors can look like this; try again later or "
                 "fetch manually."
+            )
+
+        # A Drive quota page is HTML and passes is_file() happily, then fails
+        # deep inside the loader with something unhelpful. Torch checkpoints
+        # are zip archives ("PK") or legacy pickles (0x80); HTML is neither.
+        head = path.read_bytes()[:2]
+        if head[:1] not in (b"P", b"\x80"):
+            path.unlink(missing_ok=True)
+            raise RuntimeError(
+                f"What downloaded to {path.name} is not a torch checkpoint -- "
+                "it starts with "
+                f"{head!r}, which usually means Google Drive returned a quota "
+                f"or login page. Download it manually from {url}."
             )
 
     # -- preprocessing -----------------------------------------------------

@@ -44,6 +44,7 @@ from eval.ablation import Observation, build_pairs, run_ablation  # noqa: E402
 from eval.metrics import (  # noqa: E402
     evaluate_identification,
     fairness_breakdown,
+    fairness_summary,
 )
 
 # Noise per modality, mirroring the ordering measured in phases 2-5: face is by
@@ -287,39 +288,59 @@ def main(argv: list[str] | None = None) -> int:
         from eval.ablation import score_fusion
 
         genuine, impostor, _ = score_fusion(pairs, "quality_weighted", calibrations)
-        genuine_groups, impostor_groups = [], []
-        for pair in pairs:
-            inputs_ok = any(
-                pair.a.has(m) and pair.b.has(m) for m in calibrations
-            )
-            if not inputs_ok:
-                continue
-            (genuine_groups if pair.same else impostor_groups).append(pair.group)
 
-        size = min(len(genuine), len(genuine_groups))
-        impostor_size = min(len(impostor), len(impostor_groups))
-        reports = fairness_breakdown(
-            genuine[:size],
-            impostor[:impostor_size],
-            np.array(genuine_groups[:size]),
-            np.array(impostor_groups[:impostor_size]),
-        )
-        print(f"{'group':<12} {'AUC':>8} {'TAR@1e-2':>10} {'genuine':>9} {'impostor':>9}")
-        print("-" * 52)
-        for group, report in sorted(reports.items()):
+        # Collect each score's group in the same order score_fusion produced
+        # them, so a score and its label cannot drift apart. Cross-group pairs
+        # carry no group and are dropped from BOTH lists together: a pair
+        # spanning two groups belongs to neither, and assigning it to one
+        # measures that group's false-accept rate on the wrong population.
+        kept_genuine, kept_impostor = [], []
+        genuine_groups, impostor_groups = [], []
+        genuine_index = impostor_index = 0
+        cross_group = 0
+
+        for pair in pairs:
+            if not any(pair.a.has(m) and pair.b.has(m) for m in calibrations):
+                continue  # score_fusion skipped this one too
+            if pair.same:
+                score = genuine[genuine_index] if genuine_index < len(genuine) else None
+                genuine_index += 1
+                target, labels = kept_genuine, genuine_groups
+            else:
+                score = (
+                    impostor[impostor_index] if impostor_index < len(impostor) else None
+                )
+                impostor_index += 1
+                target, labels = kept_impostor, impostor_groups
+
+            if score is None:
+                continue
+            if not pair.group:
+                cross_group += 1
+                continue
+            target.append(score)
+            labels.append(pair.group)
+
+        if cross_group:
             print(
-                f"{group:<12} {report.auc:>8.4f} "
-                f"{report.tar_at_far.get(0.01, 0.0):>10.4f} "
-                f"{report.genuine_count:>9} {report.impostor_count:>9}"
+                f"{cross_group} cross-group pairs excluded -- a pair spanning "
+                "two groups\nbelongs to neither.\n"
             )
-        if len(reports) > 1:
-            aucs = [r.auc for r in reports.values()]
-            print(f"\nspread in AUC across groups: {max(aucs) - min(aucs):.4f}")
+
+        if len(kept_genuine) < 2 or len(kept_impostor) < 2:
             print(
-                "A wide spread means the system works better for some groups\n"
-                "than others. On real data that is the finding that matters most\n"
-                "in this table, and an aggregate number would hide it entirely."
+                "Not enough within-group pairs to break down. Raise --people, "
+                "or use fewer --groups."
             )
+        else:
+            reports = fairness_breakdown(
+                np.array(kept_genuine),
+                np.array(kept_impostor),
+                np.array(genuine_groups),
+                np.array(impostor_groups),
+            )
+            for line in fairness_summary(reports):
+                print(line)
 
     print(
         "\nNOTE: these are SYNTHETIC identities with chosen noise levels. The\n"
