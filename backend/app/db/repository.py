@@ -300,12 +300,24 @@ class WatchlistRepository:
         if decision is None:
             raise ValueError(f"No match decision with id {decision_id}")
 
+        # Re-reviewing is allowed, because people make mistakes and the history
+        # has to show the correction. But an overturn is marked as one: without
+        # it, `status` -- which /alerts and the dispatcher gate on -- could be
+        # flipped back and forth and every review would look like a first
+        # opinion.
+        previously = decision.status
+        overturns = previously in (
+            DecisionStatus.CONFIRMED,
+            DecisionStatus.REJECTED,
+        ) and previously is not verdict
+
         self.session.add(
             DecisionReview(
                 decision_pk=decision.id,
                 operator=operator.strip(),
                 verdict=verdict,
                 reason=reason,
+                overturns_previous=overturns,
             )
         )
         # Denormalised for querying; the reviews remain the source of truth.
@@ -318,6 +330,8 @@ class WatchlistRepository:
                 "decision_id": decision.id,
                 "verdict": verdict.value,
                 "score": decision.score,
+                "overturns_previous": overturns,
+                "previous_status": previously.value,
             },
         )
         self.session.commit()

@@ -69,3 +69,65 @@ def synthetic_people_video() -> Path:
             "Run `python scripts/make_test_video.py` to generate the test clip."
         )
     return path
+
+
+# ---------------------------------------------------------------------------
+# API clients
+#
+# Every route except /health now requires a signed-in operator (SEC-01), so
+# tests need a real session rather than an anonymous one. `api_client` is
+# authenticated; `anon_client` deliberately is not, for the tests that assert
+# the door is actually locked.
+# ---------------------------------------------------------------------------
+
+TEST_OPERATOR = "tester"
+TEST_PASSWORD = "test-password-1234"
+
+
+@pytest.fixture
+def api_engine(monkeypatch):
+    monkeypatch.delenv("FRS_TEMPLATE_ENCRYPTION_KEY", raising=False)
+    # A fixed signing key, so tokens are stable within a test run.
+    monkeypatch.setenv("FRS_AUTH_SECRET", "test-signing-secret-not-for-real-use")
+
+    from app.db.repository import make_engine
+
+    return make_engine("sqlite:///:memory:")
+
+
+@pytest.fixture
+def anon_client(api_engine):
+    """A client with no credentials."""
+    from fastapi.testclient import TestClient
+
+    from app.api.main import create_app
+
+    app = create_app(engine=api_engine)
+    with TestClient(app) as client:
+        client.engine = api_engine
+        yield client
+
+
+@pytest.fixture
+def api_client(anon_client, api_engine):
+    """A client signed in as a test operator."""
+    from app.api.auth import create_operator
+    from app.db.repository import session_factory
+
+    session = session_factory(api_engine)()
+    try:
+        create_operator(
+            session, TEST_OPERATOR, TEST_PASSWORD, display_name="Tester", is_admin=True
+        )
+    finally:
+        session.close()
+
+    response = anon_client.post(
+        "/api/auth/login",
+        json={"username": TEST_OPERATOR, "password": TEST_PASSWORD},
+    )
+    assert response.status_code == 200, response.text
+    anon_client.headers.update(
+        {"Authorization": f"Bearer {response.json()['token']}"}
+    )
+    return anon_client

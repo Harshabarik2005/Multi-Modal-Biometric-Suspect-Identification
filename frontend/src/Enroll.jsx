@@ -267,7 +267,7 @@ function ReadinessReport({ preview }) {
   )
 }
 
-export default function Enroll({ operator, onError, onEnrolled }) {
+export default function Enroll({ onError, onEnrolled }) {
   const [files, setFiles] = useState([])
   const [personId, setPersonId] = useState('')
   const [displayName, setDisplayName] = useState('')
@@ -321,7 +321,6 @@ export default function Enroll({ operator, onError, onEnrolled }) {
         personId: personId.trim(),
         displayName: displayName.trim(),
         notes,
-        operator,
         replace,
       })
       setJob(started)

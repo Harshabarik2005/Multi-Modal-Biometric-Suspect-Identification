@@ -15,7 +15,7 @@ from sqlalchemy.engine import Engine
 from app.core.config import Settings, get_settings
 from app.core.logging import get_logger, setup_logging
 from app.db.repository import create_schema, make_engine, session_factory
-from app.api import ingest, routes
+from app.api import auth, ingest, routes
 from app.api.jobs import JobRunner
 
 logger = get_logger(__name__)
@@ -33,6 +33,16 @@ Every decision records the per-modality weights that produced it, so a reviewer
 can see whether a match rested on a clear face or mostly on a jacket.
 
 Biometric templates are encrypted at rest and are never returned over this API.
+
+Authentication
+--------------
+Every route except `/health` requires a signed-in operator. `POST /auth/login`
+exchanges a password for a bearer token; send it as `Authorization: Bearer ...`.
+
+The operator recorded on a review comes from that token, never from the request
+body. Create the first account with:
+
+    python scripts/manage_operators.py --create <username>
 
 Uploading
 ---------
@@ -100,6 +110,7 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None) -
 
     app.dependency_overrides[routes.get_session] = get_session
     app.dependency_overrides[ingest.get_session] = get_session
+    app.dependency_overrides[auth.get_auth_session] = get_session
     app.dependency_overrides[ingest.get_runner] = lambda: runner
     app.dependency_overrides[ingest.get_app_settings] = lambda: settings
 

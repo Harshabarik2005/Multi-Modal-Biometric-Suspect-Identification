@@ -7,11 +7,46 @@
  * handle embedding data.
  */
 
+/**
+ * The bearer token for the signed-in operator.
+ *
+ * Held in memory, not localStorage. A token in localStorage is readable by any
+ * script that ends up on the page, and this one can confirm an identification.
+ * The cost is that a refresh signs you out, which is the right trade for what
+ * this token authorises.
+ */
+let authToken = null
+let onUnauthorized = null
+
+export function setToken(token) {
+  authToken = token
+}
+
+export function clearToken() {
+  authToken = null
+}
+
+export function setUnauthorizedHandler(handler) {
+  onUnauthorized = handler
+}
+
+function authHeaders(extra = {}) {
+  return authToken
+    ? { ...extra, Authorization: `Bearer ${authToken}` }
+    : { ...extra }
+}
+
 async function request(path, options = {}) {
   const response = await fetch(`/api${path}`, {
-    headers: { 'Content-Type': 'application/json' },
     ...options,
+    headers: authHeaders({ 'Content-Type': 'application/json', ...(options.headers || {}) }),
   })
+
+  if (response.status === 401) {
+    clearToken()
+    onUnauthorized?.()
+    throw new Error('Your session has ended. Sign in again.')
+  }
 
   if (!response.ok) {
     let detail = `${response.status} ${response.statusText}`
@@ -34,6 +69,19 @@ async function request(path, options = {}) {
 export const api = {
   health: () => request('/health'),
 
+  login: async (username, password) => {
+    const session = await request('/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ username, password }),
+    })
+    setToken(session.token)
+    return session
+  },
+
+  me: () => request('/auth/me'),
+
+  stats: () => request('/stats'),
+
   watchlist: (includeRetired = false) =>
     request(`/watchlist?include_retired=${includeRetired}`),
 
@@ -45,23 +93,23 @@ export const api = {
       body: JSON.stringify(payload),
     }),
 
-  retirePerson: (personId, operator) =>
-    request(
-      `/watchlist/${encodeURIComponent(personId)}?operator=${encodeURIComponent(operator)}`,
-      { method: 'DELETE' },
-    ),
+  retirePerson: (personId) =>
+    request(`/watchlist/${encodeURIComponent(personId)}`, { method: 'DELETE' }),
 
   decisions: (pendingOnly = true, limit = 100) =>
     request(`/decisions?pending_only=${pendingOnly}&limit=${limit}`),
 
   /**
-   * Record a human verdict. This is the only route to a confirmed match --
-   * nothing in the system confirms one on its own.
+   * Record a human verdict. The only route to a confirmed match.
+   *
+   * The operator is NOT sent: the server takes it from the authenticated
+   * session, so a decision records who was actually signed in rather than
+   * whatever name the page claimed.
    */
-  review: (decisionId, operator, verdict, reason = '') =>
+  review: (decisionId, verdict, reason = '') =>
     request(`/decisions/${decisionId}/review`, {
       method: 'POST',
-      body: JSON.stringify({ operator, verdict, reason }),
+      body: JSON.stringify({ verdict, reason }),
     }),
 
   alerts: (limit = 100) => request(`/alerts?limit=${limit}`),
@@ -78,14 +126,13 @@ export const api = {
    */
   previewEnrollment: (files) => upload('/enroll/preview', { files }),
 
-  enroll: ({ files, personId, displayName, notes, operator, replace }) =>
+  enroll: ({ files, personId, displayName, notes, replace }) =>
     upload('/enroll', {
       files,
       fields: {
         person_id: personId,
         display_name: displayName,
         notes: notes || '',
-        operator: operator || 'unknown',
         replace: replace ? 'true' : 'false',
       },
     }),
@@ -109,7 +156,17 @@ async function upload(path, { files = [], fields = {} }) {
   for (const [key, value] of Object.entries(fields)) body.append(key, value)
   for (const file of files) body.append('files', file, file.name)
 
-  const response = await fetch(`/api${path}`, { method: 'POST', body })
+  const response = await fetch(`/api${path}`, {
+    method: 'POST',
+    body,
+    headers: authHeaders(),
+  })
+
+  if (response.status === 401) {
+    clearToken()
+    onUnauthorized?.()
+    throw new Error('Your session has ended. Sign in again.')
+  }
   if (!response.ok) {
     let detail = `${response.status} ${response.statusText}`
     try {

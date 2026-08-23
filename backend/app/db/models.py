@@ -178,14 +178,52 @@ class DecisionReview(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     decision_pk: Mapped[int] = mapped_column(ForeignKey("match_decisions.id"))
 
-    #: Who decided. Free text until Phase 7 grows real authentication; the
-    #: point is that a row cannot exist without naming someone.
+    #: The authenticated operator's username, copied at review time. Not
+    #: supplied by the caller -- see app/api/auth.py. It used to be free text
+    #: from the request body, which made every entry in the audit trail an
+    #: unverified claim.
     operator: Mapped[str] = mapped_column(String(120))
     verdict: Mapped[DecisionStatus] = mapped_column(Enum(DecisionStatus))
     reason: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    #: True when this review overturned an earlier verdict. Overturning is
+    #: allowed -- people make mistakes -- but it is recorded as such rather
+    #: than looking like a first opinion.
+    overturns_previous: Mapped[bool] = mapped_column(default=False)
 
     decision: Mapped[MatchDecision] = relationship(back_populates="reviews")
+
+
+class Operator(Base):
+    """Someone allowed to use the system.
+
+    Before this existed, `operator` was a free-text field on a review -- so the
+    audit trail recorded a claimed name that nobody had verified, and every
+    decision in it was repudiable. An identification confirmed by "whoever
+    typed alice" is not confirmed by anyone.
+
+    Passwords are scrypt-hashed with a per-account salt; the plaintext is never
+    stored and never logged.
+    """
+
+    __tablename__ = "operators"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    username: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    display_name: Mapped[str] = mapped_column(String(200), default="")
+
+    password_salt: Mapped[str] = mapped_column(String(64))
+    password_hash: Mapped[str] = mapped_column(String(128))
+
+    is_active: Mapped[bool] = mapped_column(default=True)
+    #: Admins may manage other operators. Everything else is open to any
+    #: signed-in operator; finer authorisation is not modelled yet.
+    is_admin: Mapped[bool] = mapped_column(default=False)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_login_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class AuditEvent(Base):

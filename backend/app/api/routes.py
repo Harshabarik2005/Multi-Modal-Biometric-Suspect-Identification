@@ -28,8 +28,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from app.api.auth import CurrentOperator, authenticate, issue_token
 from app.core.logging import get_logger
-from app.db.models import DecisionStatus, MatchDecision, Person
+from app.db.models import DecisionStatus, MatchDecision, Operator, Person
 from app.db.repository import WatchlistRepository
 
 logger = get_logger(__name__)
@@ -154,11 +155,33 @@ class ReviewOut(BaseModel):
 
 
 class ReviewIn(BaseModel):
-    """A human's verdict. `operator` is required, not defaulted."""
+    """A human's verdict.
 
-    operator: str = Field(min_length=1, max_length=120)
+    Note what is NOT here: the operator. Identity comes from the authenticated
+    session, never from the request body. A caller cannot assert who they are.
+    """
+
     verdict: str = Field(pattern="^(confirmed|rejected)$")
-    reason: str = ""
+    reason: str = Field("", max_length=2000)
+
+
+class LoginIn(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=256)
+
+
+class LoginOut(BaseModel):
+    token: str
+    username: str
+    display_name: str
+    is_admin: bool
+    expires_in_seconds: int
+
+
+class MeOut(BaseModel):
+    username: str
+    display_name: str
+    is_admin: bool
 
 
 class AuditOut(BaseModel):
@@ -172,18 +195,63 @@ class AuditOut(BaseModel):
 DecisionOut.model_rebuild()
 
 
+# -- auth ------------------------------------------------------------------
+
+@router.post("/auth/login", response_model=LoginOut, tags=["auth"])
+def login(
+    payload: LoginIn,
+    session: Annotated[Session, Depends(get_session)],
+) -> LoginOut:
+    """Exchange a password for a token.
+
+    Deliberately does not say whether the username or the password was wrong;
+    the distinction is only useful for enumerating accounts.
+    """
+    from app.api.auth import TOKEN_TTL_SECONDS
+    from app.db.models import utcnow
+
+    operator = authenticate(session, payload.username, payload.password)
+    if operator is None:
+        logger.warning("Failed sign-in for %r", payload.username)
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED, "Incorrect username or password."
+        )
+
+    operator.last_login_at = utcnow()
+    session.commit()
+    logger.info("Operator %s signed in", operator.username)
+
+    return LoginOut(
+        token=issue_token(operator.username),
+        username=operator.username,
+        display_name=operator.display_name,
+        is_admin=operator.is_admin,
+        expires_in_seconds=TOKEN_TTL_SECONDS,
+    )
+
+
+@router.get("/auth/me", response_model=MeOut, tags=["auth"])
+def whoami(operator: CurrentOperator) -> MeOut:
+    return MeOut(
+        username=operator.username,
+        display_name=operator.display_name,
+        is_admin=operator.is_admin,
+    )
+
+
 # -- watchlist -------------------------------------------------------------
 
 @router.get("/watchlist", response_model=list[PersonOut], tags=["watchlist"])
 def list_watchlist(
     repo: Repo,
+    operator: CurrentOperator,
     include_retired: bool = Query(False, description="Include retired entries."),
 ) -> list[PersonOut]:
     return [PersonOut.of(p) for p in repo.list_people(include_retired=include_retired)]
 
 
 @router.get("/watchlist/{person_id}", response_model=PersonOut, tags=["watchlist"])
-def get_person(person_id: str, repo: Repo) -> PersonOut:
+def get_person(person_id: str, repo: Repo, operator: CurrentOperator) -> PersonOut:
     person = repo.get_person(person_id)
     if person is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"No such person: {person_id}")
@@ -191,7 +259,9 @@ def get_person(person_id: str, repo: Repo) -> PersonOut:
 
 
 @router.patch("/watchlist/{person_id}", response_model=PersonOut, tags=["watchlist"])
-def update_person(person_id: str, payload: PersonUpdate, repo: Repo) -> PersonOut:
+def update_person(
+    person_id: str, payload: PersonUpdate, repo: Repo, operator: CurrentOperator
+) -> PersonOut:
     """Edit descriptive fields only. Templates are replaced by re-enrolling."""
     person = repo.get_person(person_id)
     if person is None:
@@ -201,19 +271,24 @@ def update_person(person_id: str, payload: PersonUpdate, repo: Repo) -> PersonOu
         person.display_name = payload.display_name
     if payload.notes is not None:
         person.notes = payload.notes
-    repo.log("update", subject=person_id, detail=payload.model_dump(exclude_none=True))
+    repo.log(
+        "update",
+        actor=operator.username,
+        subject=person_id,
+        detail=payload.model_dump(exclude_none=True),
+    )
     repo.session.commit()
     return PersonOut.of(person)
 
 
 @router.delete("/watchlist/{person_id}", tags=["watchlist"])
-def retire_person(person_id: str, repo: Repo, operator: str = Query(...)) -> dict:
+def retire_person(person_id: str, repo: Repo, operator: CurrentOperator) -> dict:
     """Retire, not delete.
 
     Match decisions reference this person; removing the row would make past
     decisions unreviewable.
     """
-    if not repo.retire(person_id, actor=operator):
+    if not repo.retire(person_id, actor=operator.username):
         raise HTTPException(
             status.HTTP_404_NOT_FOUND,
             f"No active watchlist entry for {person_id}",
@@ -226,6 +301,7 @@ def retire_person(person_id: str, repo: Repo, operator: str = Query(...)) -> dic
 @router.get("/decisions", response_model=list[DecisionOut], tags=["decisions"])
 def list_decisions(
     repo: Repo,
+    operator: CurrentOperator,
     pending_only: bool = Query(True, description="Only decisions awaiting review."),
     limit: int = Query(100, ge=1, le=1000),
 ) -> list[DecisionOut]:
@@ -245,7 +321,7 @@ def list_decisions(
 
 
 @router.get("/decisions/{decision_id}", response_model=DecisionOut, tags=["decisions"])
-def get_decision(decision_id: int, repo: Repo) -> DecisionOut:
+def get_decision(decision_id: int, repo: Repo, operator: CurrentOperator) -> DecisionOut:
     decision = repo.session.get(MatchDecision, decision_id)
     if decision is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No such decision")
@@ -255,7 +331,12 @@ def get_decision(decision_id: int, repo: Repo) -> DecisionOut:
 @router.post(
     "/decisions/{decision_id}/review", response_model=DecisionOut, tags=["decisions"]
 )
-def review_decision(decision_id: int, payload: ReviewIn, repo: Repo) -> DecisionOut:
+def review_decision(
+    decision_id: int,
+    payload: ReviewIn,
+    repo: Repo,
+    operator: CurrentOperator,
+) -> DecisionOut:
     """Record a human verdict on a candidate match.
 
     This is the only route to CONFIRMED. Nothing in the system confirms a match
@@ -263,9 +344,10 @@ def review_decision(decision_id: int, payload: ReviewIn, repo: Repo) -> Decision
     than a convention.
     """
     try:
+        # The authenticated principal, not anything the body claims.
         decision = repo.review(
             decision_id,
-            operator=payload.operator,
+            operator=operator.username,
             verdict=DecisionStatus(payload.verdict),
             reason=payload.reason,
         )
@@ -275,7 +357,9 @@ def review_decision(decision_id: int, payload: ReviewIn, repo: Repo) -> Decision
 
 
 @router.get("/alerts", response_model=list[DecisionOut], tags=["decisions"])
-def actionable_alerts(repo: Repo, limit: int = Query(100, ge=1, le=1000)) -> list[DecisionOut]:
+def actionable_alerts(
+    repo: Repo, operator: CurrentOperator, limit: int = Query(100, ge=1, le=1000)
+) -> list[DecisionOut]:
     """Human-confirmed decisions only.
 
     Phase 9's alerting reads this and nothing else, so an unreviewed match can
@@ -287,7 +371,9 @@ def actionable_alerts(repo: Repo, limit: int = Query(100, ge=1, le=1000)) -> lis
 # -- audit -----------------------------------------------------------------
 
 @router.get("/audit", response_model=list[AuditOut], tags=["audit"])
-def audit_trail(repo: Repo, limit: int = Query(200, ge=1, le=2000)) -> list[AuditOut]:
+def audit_trail(
+    repo: Repo, operator: CurrentOperator, limit: int = Query(200, ge=1, le=2000)
+) -> list[AuditOut]:
     return [
         AuditOut(
             kind=event.kind,
@@ -301,9 +387,21 @@ def audit_trail(repo: Repo, limit: int = Query(200, ge=1, le=2000)) -> list[Audi
 
 
 @router.get("/health", tags=["meta"])
-def health(repo: Repo) -> dict:
+def health() -> dict:
+    """Liveness only, and deliberately unauthenticated.
+
+    It reports nothing about the watchlist. It used to return how many people
+    were enrolled and how many decisions were pending, which is a small but
+    real disclosure to an unauthenticated caller -- enough to tell whether a
+    given installation is in use.
+    """
+    return {"status": "ok"}
+
+
+@router.get("/stats", tags=["meta"])
+def stats(repo: Repo, operator: CurrentOperator) -> dict:
+    """The counts /health used to give away."""
     return {
-        "status": "ok",
         "watchlist": len(repo.list_people()),
         "pending_decisions": len(repo.pending_decisions(limit=1000)),
     }

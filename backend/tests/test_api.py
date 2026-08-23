@@ -32,15 +32,9 @@ def repo(monkeypatch):
 
 
 @pytest.fixture
-def client(monkeypatch):
-    monkeypatch.delenv("FRS_TEMPLATE_ENCRYPTION_KEY", raising=False)
-    from app.api.main import create_app
-
-    engine = make_engine("sqlite:///:memory:")
-    app = create_app(engine=engine)
-    with TestClient(app) as test_client:
-        test_client.engine = engine
-        yield test_client
+def client(api_client):
+    """Signed in. Auth is required on every route except /health (SEC-01)."""
+    return api_client
 
 
 def embedding(modality: Modality = Modality.FACE, dim: int = 8, seed: int = 0):
@@ -274,7 +268,8 @@ class TestAPI:
 
     def test_delete_retires_rather_than_removing(self, client) -> None:
         self._enroll(client)
-        assert client.delete("/api/watchlist/ravi?operator=alice").status_code == 200
+        # No operator query parameter any more: it comes from the session.
+        assert client.delete("/api/watchlist/ravi").status_code == 200
         assert client.get("/api/watchlist").json() == []
         assert len(client.get("/api/watchlist?include_retired=true").json()) == 1
 
@@ -291,16 +286,46 @@ class TestAPI:
 
         # "pending" is not a human verdict and the schema rejects it.
         bad = client.post(
-            f"/api/decisions/{decision_id}/review",
-            json={"operator": "alice", "verdict": "pending"},
+            f"/api/decisions/{decision_id}/review", json={"verdict": "pending"}
         )
         assert bad.status_code == 422
 
-        blank = client.post(
-            f"/api/decisions/{decision_id}/review",
-            json={"operator": "", "verdict": "confirmed"},
+        missing = client.post(f"/api/decisions/{decision_id}/review", json={})
+        assert missing.status_code == 422
+
+    def test_reviewing_requires_being_signed_in(self, anon_client) -> None:
+        """The guardrail is only real if the door is locked (SEC-01)."""
+        response = anon_client.post(
+            "/api/decisions/1/review", json={"verdict": "confirmed"}
         )
-        assert blank.status_code == 422
+        assert response.status_code == 401
+
+    def test_the_operator_comes_from_the_session_not_the_body(self, client) -> None:
+        """The whole point of SEC-01.
+
+        The audit trail used to record whatever name the request supplied, so
+        every entry was an unverified claim and the trail was repudiable. A
+        caller can still put an `operator` field in the body; it is ignored.
+        """
+        self._enroll(client)
+        session = session_factory(client.engine)()
+        decision_id = (
+            WatchlistRepository(session)
+            .record_match("ravi", track_id=1, score=0.9, weights={Modality.FACE: 1.0})
+            .id
+        )
+        session.close()
+
+        response = client.post(
+            f"/api/decisions/{decision_id}/review",
+            json={
+                "verdict": "confirmed",
+                "operator": "somebody-else",  # ignored
+                "reason": "spoof attempt",
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["reviews"][0]["operator"] == "tester"
 
     def test_full_review_flow(self, client) -> None:
         self._enroll(client)
@@ -326,11 +351,12 @@ class TestAPI:
 
         confirmed = client.post(
             f"/api/decisions/{decision_id}/review",
-            json={"operator": "alice", "verdict": "confirmed", "reason": "clear face"},
+            json={"verdict": "confirmed", "reason": "clear face"},
         )
         assert confirmed.status_code == 200
         assert confirmed.json()["is_actionable"] is True
-        assert confirmed.json()["reviews"][0]["operator"] == "alice"
+        # The signed-in operator, not anything the body said.
+        assert confirmed.json()["reviews"][0]["operator"] == "tester"
 
         alerts = client.get("/api/alerts").json()
         assert len(alerts) == 1

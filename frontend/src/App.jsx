@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useState } from 'react'
-import { api, MODALITIES, appearanceShare } from './api'
+import {
+  api,
+  clearToken,
+  setUnauthorizedHandler,
+  MODALITIES,
+  appearanceShare,
+} from './api'
 import Enroll from './Enroll'
+import Login from './Login'
 import Scan from './Scan'
 
 /* ------------------------------------------------------------------ *
@@ -106,18 +113,16 @@ function EvidenceCaution({ weights }) {
  * Review queue
  * ------------------------------------------------------------------ */
 
-function DecisionCard({ decision, operator, onReviewed, onError }) {
+function DecisionCard({ decision, onReviewed, onError }) {
   const [reason, setReason] = useState('')
   const [busy, setBusy] = useState(false)
 
   const submit = async (verdict) => {
-    if (!operator.trim()) {
-      onError('Enter your name before reviewing. Decisions record who made them.')
-      return
-    }
     setBusy(true)
     try {
-      await api.review(decision.id, operator.trim(), verdict, reason)
+      // No operator argument: the server takes it from the session, so a
+      // decision records who was actually signed in.
+      await api.review(decision.id, verdict, reason)
       onReviewed()
     } catch (error) {
       onError(error.message)
@@ -183,7 +188,7 @@ function DecisionCard({ decision, operator, onReviewed, onError }) {
   )
 }
 
-function ReviewQueue({ operator, onError }) {
+function ReviewQueue({ onError }) {
   const [decisions, setDecisions] = useState([])
   const [loading, setLoading] = useState(true)
 
@@ -227,7 +232,6 @@ function ReviewQueue({ operator, onError }) {
         <DecisionCard
           key={decision.id}
           decision={decision}
-          operator={operator}
           onReviewed={load}
           onError={onError}
         />
@@ -417,30 +421,54 @@ const TABS = [
 ]
 
 export default function App() {
+  const [session, setSession] = useState(null)
   const [tab, setTab] = useState('enroll')
-  // Bumped to force the watchlist and queue to refetch after an
-  // enrolment or scan, so the tabs are never stale.
-  const [version, setVersion] = useState(0)
   const [error, setError] = useState(null)
-  const [health, setHealth] = useState(null)
-  // Kept in localStorage so a reviewer does not retype it, but still recorded
-  // on every decision -- an anonymous confirmation is not an audit trail.
-  const [operator, setOperator] = useState(
-    () => localStorage.getItem('frs-operator') || '',
-  )
-
-  useEffect(() => {
-    localStorage.setItem('frs-operator', operator)
-  }, [operator])
-
-  useEffect(() => {
-    api
-      .health()
-      .then(setHealth)
-      .catch((e) => setError(`Cannot reach the API: ${e.message}`))
-  }, [])
+  const [stats, setStats] = useState(null)
+  // Bumped to force the watchlist and queue to refetch after an enrolment or
+  // scan, so the tabs are never stale.
+  const [version, setVersion] = useState(0)
 
   const onError = useCallback((message) => setError(message), [])
+
+  // A token can expire mid-session. Rather than showing a wall of failures,
+  // drop straight back to the sign-in screen.
+  useEffect(() => {
+    setUnauthorizedHandler(() => {
+      setSession(null)
+      setError('Your session ended. Sign in again.')
+    })
+    return () => setUnauthorizedHandler(null)
+  }, [])
+
+  useEffect(() => {
+    if (!session) return
+    api
+      .stats()
+      .then(setStats)
+      .catch(() => setStats(null))
+  }, [session, version, tab])
+
+  if (!session) {
+    return (
+      <>
+        {error && (
+          <div className="login-notice">
+            <div className="error" onClick={() => setError(null)}>
+              {error}
+            </div>
+          </div>
+        )}
+        <Login onSignedIn={setSession} />
+      </>
+    )
+  }
+
+  const signOut = () => {
+    clearToken()
+    setSession(null)
+    setError(null)
+  }
 
   return (
     <div className="app">
@@ -451,22 +479,21 @@ export default function App() {
             Multi-modal identification — face, gait and appearance
           </p>
         </div>
-        <div className="operator">
-          <label htmlFor="operator">Reviewing as</label>
-          <input
-            id="operator"
-            type="text"
-            placeholder="your name"
-            value={operator}
-            onChange={(event) => setOperator(event.target.value)}
-          />
+        <div className="session">
+          <span className="muted small">
+            Signed in as <strong>{session.display_name || session.username}</strong>
+          </span>
+          <button className="btn btn-reject btn-small" onClick={signOut}>
+            Sign out
+          </button>
         </div>
       </header>
 
       <p className="notice">
-        This system does not act on its own. Every candidate below is a
-        suggestion for a human to confirm or reject, and the reasoning behind
-        each one is shown so it can be judged rather than trusted.
+        This system does not act on its own. Every candidate is a suggestion for
+        a human to confirm or reject, the reasoning behind each one is shown so
+        it can be judged rather than trusted, and whatever you decide is
+        recorded against your account.
       </p>
 
       {error && (
@@ -483,8 +510,8 @@ export default function App() {
             onClick={() => setTab(entry.id)}
           >
             {entry.label}
-            {entry.id === 'review' && health?.pending_decisions > 0 && (
-              <span className="badge">{health.pending_decisions}</span>
+            {entry.id === 'review' && stats?.pending_decisions > 0 && (
+              <span className="badge">{stats.pending_decisions}</span>
             )}
           </button>
         ))}
@@ -492,18 +519,12 @@ export default function App() {
 
       <main>
         {tab === 'enroll' && (
-          <Enroll
-            operator={operator}
-            onError={onError}
-            onEnrolled={() => setVersion((v) => v + 1)}
-          />
+          <Enroll onError={onError} onEnrolled={() => setVersion((v) => v + 1)} />
         )}
         {tab === 'scan' && (
           <Scan onError={onError} onScanned={() => setVersion((v) => v + 1)} />
         )}
-        {tab === 'review' && (
-          <ReviewQueue key={version} operator={operator} onError={onError} />
-        )}
+        {tab === 'review' && <ReviewQueue key={version} onError={onError} />}
         {tab === 'watchlist' && <Watchlist key={version} onError={onError} />}
         {tab === 'alerts' && <Alerts key={version} onError={onError} />}
         {tab === 'audit' && <Audit key={version} onError={onError} />}

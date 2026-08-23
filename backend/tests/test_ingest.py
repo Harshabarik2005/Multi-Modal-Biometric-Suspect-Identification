@@ -31,13 +31,9 @@ PROBE_CLIP = REPO / "data" / "test_videos" / "probe_two_subjects.mp4"
 
 
 @pytest.fixture
-def client(monkeypatch):
-    monkeypatch.delenv("FRS_TEMPLATE_ENCRYPTION_KEY", raising=False)
-    from app.api.main import create_app
-
-    app = create_app(engine=make_engine("sqlite:///:memory:"))
-    with TestClient(app) as test_client:
-        yield test_client
+def client(api_client):
+    """Signed in. Auth is required on every route except /health (SEC-01)."""
+    return api_client
 
 
 def wait_for(client: TestClient, job_id: str, timeout: float = 600.0) -> dict:

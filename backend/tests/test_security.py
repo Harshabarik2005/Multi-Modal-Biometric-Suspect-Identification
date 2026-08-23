@@ -19,13 +19,9 @@ from app.db.repository import make_engine
 
 
 @pytest.fixture
-def client(monkeypatch):
-    monkeypatch.delenv("FRS_TEMPLATE_ENCRYPTION_KEY", raising=False)
-    from app.api.main import create_app
-
-    app = create_app(engine=make_engine("sqlite:///:memory:"))
-    with TestClient(app) as test_client:
-        yield test_client
+def client(api_client):
+    """Signed in. Auth is required on every route except /health (SEC-01)."""
+    return api_client
 
 
 class TestSettingsIsolation:
@@ -157,6 +153,10 @@ class TestNoPickleSinks:
 
     def test_a_downloaded_html_page_is_rejected(self, tmp_path) -> None:
         """A Drive quota page passes is_file() and only fails inside the loader."""
+        # gdown is only needed to fetch weights, so it is not a hard dependency;
+        # without it there is no download path to test.
+        pytest.importorskip("gdown")
+
         from app.embeddings.reid import ReIDEmbedder
 
         embedder = ReIDEmbedder.__new__(ReIDEmbedder)

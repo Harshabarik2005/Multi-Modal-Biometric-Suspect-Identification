@@ -47,6 +47,29 @@ IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 VIDEO_SUFFIXES = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v"}
 
 
+def read_image(path: Path) -> np.ndarray | None:
+    """Decode an image file, or return None if it is not one.
+
+    Not `cv2.imread`: importing ultralytics replaces it with a wrapper that
+    dereferences the decoded array before checking it, so an undecodable file
+    raises AttributeError from deep inside a library instead of returning None.
+    An upload is untrusted input -- "this file is not an image" is a normal
+    outcome to report, not a crash. Reading the bytes ourselves also sidesteps
+    imread's inability to open paths that are not ASCII.
+    """
+    try:
+        buffer = np.frombuffer(path.read_bytes(), dtype=np.uint8)
+    except OSError:
+        return None
+    if buffer.size == 0:
+        return None
+
+    image = cv2.imdecode(buffer, cv2.IMREAD_COLOR)
+    if image is None or image.size == 0:
+        return None
+    return image
+
+
 def kind_of(path: Path) -> str:
     suffix = path.suffix.lower()
     if suffix in IMAGE_SUFFIXES:
@@ -99,7 +122,7 @@ def observations_from_images(
     observations: list[TrackObservation] = []
 
     for index, path in enumerate(paths):
-        image = cv2.imread(str(path))
+        image = read_image(path)
         if image is None:
             summary.rejected.append((path.name, "could not be decoded as an image"))
             continue

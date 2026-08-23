@@ -30,6 +30,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, s
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from app.api.auth import CurrentOperator
 from app.api.jobs import Job, JobRunner, ProgressReporter
 from app.api.media import (
     assess_readiness,
@@ -151,6 +152,7 @@ async def _stage(files: list[UploadFile]) -> tuple[Path, list[Path]]:
 @router.post("/enroll/preview", response_model=PreviewOut, tags=["enrollment"])
 async def preview_enrollment(
     settings: AppSettings,
+    operator: CurrentOperator,
     files: list[UploadFile] = File(...),
 ) -> PreviewOut:
     """Check what an upload can support, without enrolling anyone.
@@ -200,18 +202,22 @@ async def preview_enrollment(
 async def enroll(
     runner: Runner,
     settings: AppSettings,
+    operator: CurrentOperator,
     # Constrained to a safe filename charset, not just a length. The
     # file-backed gallery uses person_id as a directory name, so "../.." or an
     # absolute path escapes the enrolment root entirely.
     person_id: str = Form(..., pattern=PERSON_ID_PATTERN),
     display_name: str = Form(..., min_length=1, max_length=200),
     notes: str = Form("", max_length=2000),
-    operator: str = Form("unknown", max_length=120),
     replace: bool = Form(False),
     files: list[UploadFile] = File(...),
 ) -> JobOut:
     """Enrol a person from uploaded photos and/or video."""
     directory, paths = await _stage(files)
+
+    # Captured now, from the authenticated principal. The job outlives the
+    # request, so the ORM object cannot be used inside it.
+    operator_name = operator.username
 
     from app.api.main import session_maker_for_app  # set by the app factory
 
@@ -299,7 +305,7 @@ async def enroll(
                 embeddings,
                 notes=notes,
                 source=f"{summary.videos} video(s), {summary.images} image(s)",
-                actor=operator,
+                actor=operator_name,
                 replace=replace,
             )
 
@@ -327,6 +333,7 @@ async def enroll(
 async def scan(
     runner: Runner,
     settings: AppSettings,
+    operator: CurrentOperator,
     camera_id: str = Form("", max_length=64),
     # Bounded. Unbounded, a single request could set this to 0 and make every
     # subsequent scan match everyone.
@@ -408,7 +415,7 @@ async def scan(
 # -- job status ------------------------------------------------------------
 
 @router.get("/jobs/{job_id}", response_model=JobOut, tags=["jobs"])
-def job_status(job_id: str, runner: Runner) -> JobOut:
+def job_status(job_id: str, runner: Runner, operator: CurrentOperator) -> JobOut:
     job = runner.get(job_id)
     if job is None:
         raise HTTPException(
@@ -419,7 +426,12 @@ def job_status(job_id: str, runner: Runner) -> JobOut:
 
 
 @router.get("/jobs", response_model=list[JobOut], tags=["jobs"])
-def recent_jobs(runner: Runner, kind: str | None = None, limit: int = 25) -> list[JobOut]:
+def recent_jobs(
+    runner: Runner,
+    operator: CurrentOperator,
+    kind: str | None = None,
+    limit: int = 25,
+) -> list[JobOut]:
     """Recent jobs, WITHOUT their results.
 
     The result payload of a scan lists everyone it found -- names, cameras,
