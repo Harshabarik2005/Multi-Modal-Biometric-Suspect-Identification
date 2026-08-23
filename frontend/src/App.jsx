@@ -469,10 +469,12 @@ export default function App() {
           <span className="tagline">Face · Gait · Appearance</span>
         </div>
         <div className="session">
+          {/* One line, and one sentence. The name and the words "signed in"
+              used to be split by a <br>, which read out as
+              "Demo Operatorsigned in" with no pause and no space. */}
           <span className="session-who">
+            Signed in as{' '}
             <strong>{session.display_name || session.username}</strong>
-            <br />
-            signed in
           </span>
           <button className="btn btn-quiet btn-small" onClick={signOut}>
             Sign out

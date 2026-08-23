@@ -26,42 +26,99 @@ const SECTIONS = [
   {
     key: 'face',
     title: 'Face',
-    subtitle: 'Photos or video · the identity signal, and the strongest one',
-    prompt: 'Look at the camera and turn your head slowly left, then right.',
-    angles: ['Front', 'Left profile', 'Right profile'],
-    needs: 'Face visible and roughly front-on, close enough to have real pixels.',
-    watch: 'A distant or motion-blurred face will not enrol. Several angles beat one good one.',
-    required: false,
+    subtitle: 'Photos or video · the strongest signal, and the fussiest',
+    // ArcFace scores a frame by det_score x frontality x resolution. Frontality
+    // is full credit to face.frontal_yaw_deg (20 deg) and reaches ZERO at
+    // face.max_yaw_deg (65 deg) -- so a true profile contributes literally
+    // nothing, and asking for one wastes the operator's time. Resolution is
+    // capped at face.ideal_face_height (112px of face, not of person).
+    spec: 'Face at least 112 px tall in frame, turned no more than 20° off centre for full credit.',
+    limit:
+      'Past 65° off centre a frame is scored at zero — a true side profile and the ' +
+      'back of a head contribute nothing at all, so do not bother recording them.',
+    // enroll_top_fraction 0.4 over enroll_min_frames 10: the best 40% of at
+    // least ten frames survive, so a slow sweep beats one held pose.
+    prompt:
+      'Face the camera, then turn your head slowly to one side and back — stop ' +
+      'well before your nose leaves the frame.',
+    angles: [
+      {
+        label: 'Straight on',
+        guide: 'Looking directly at the lens, eyes level. This is the reference frame.',
+      },
+      {
+        label: 'Quarter-turn left',
+        guide: 'About 30° — one ear still visible. Not a profile.',
+      },
+      {
+        label: 'Quarter-turn right',
+        guide: 'About 30° the other way. Both quarter-turns together beat one perfect front shot.',
+      },
+    ],
   },
   {
     key: 'gait',
     title: 'Gait',
-    subtitle: 'Video only · of them WALKING',
-    prompt: 'Walk across the frame from one side to the other, whole body visible.',
-    angles: ['Side-on walk', 'Walking towards camera'],
-    needs: 'Two seconds or more of continuous walking, whole body in frame.',
-    watch:
-      'Photos give nothing at all. Standing still or turning on the spot gives ' +
-      'nothing. A side-on view carries the most.',
-    required: false,
+    subtitle: 'Video only · of them walking across the frame',
+    // The cadence signal is the width of the LOWER THIRD of the silhouette --
+    // the legs. Only a side-on walk swings that width; walking at the camera
+    // keeps the legs inside the body outline and fails min_swing_ratio. Full
+    // quality needs cycles >= 2 (cycle_factor = min(1, cycles / 2)), and every
+    // clipped frame -- body touching the top or bottom edge -- is subtracted
+    // through the `unclipped` factor.
+    spec: 'Four seconds or more of unbroken walking, seen from the side, whole body inside the frame.',
+    limit:
+      'Gait is read from how far the legs swing apart, so it only works side on. ' +
+      'Walking towards or away from the camera gives almost no signal, and a still ' +
+      'photograph gives none whatsoever. Keep a gap above the head and below the ' +
+      'feet: a body touching the edge of frame is scored down, not just cropped.',
+    prompt:
+      'Walk across the frame, side on, at a normal pace — two full lengths is ' +
+      'better than one. Keep the whole body visible throughout.',
+    angles: [
+      {
+        label: 'Walking left to right',
+        guide: 'Camera side on, perpendicular to the direction of travel. Plain background if you can.',
+      },
+      {
+        label: 'Walking right to left',
+        guide: 'The same walk mirrored. Optional, but it covers cameras looking the other way.',
+      },
+    ],
   },
   {
     key: 'reid',
     title: 'Appearance',
-    subtitle: 'Photos or video · build and clothing',
-    prompt: 'Stand a few steps back so your whole body is in frame.',
-    angles: ['Full body'],
-    needs: 'Whole body in frame, head to feet.',
-    watch:
-      'Largely describes what they are wearing, so it goes stale within days. ' +
-      'Re-register if it has to stay current.',
-    required: false,
+    subtitle: 'Photos or video · build and clothing, from any side',
+    // OSNet quality is resolution x aspect-ratio x detection confidence. It is
+    // deliberately pose-blind -- a back view is fully usable, which is the
+    // whole point of the modality when a face is never visible. Resolution
+    // caps at reid.ideal_box_height (192px of person); the aspect score peaks
+    // at reid.ideal_aspect 2.5, i.e. a normal standing figure.
+    spec: 'Whole body, head to feet, at least 192 px tall. Standing normally, arms down.',
+    limit:
+      'This one does not care which way they face — a back view is as good as a ' +
+      'front one, and often the only view a real camera gets. It does care about ' +
+      'the whole body being there: half a person, or two people in one box, ' +
+      'produces a vector describing neither. It also describes clothing more ' +
+      'than the person, so it goes stale within days.',
+    prompt:
+      'Stand a few steps back so your whole body is in frame, arms at your sides.',
+    angles: [
+      { label: 'Front, full body', guide: 'Head to feet, standing straight, arms down.' },
+      {
+        label: 'Back, full body',
+        guide: 'Genuinely useful here — most CCTV never sees a face.',
+      },
+      { label: 'Side, full body', guide: 'Fills in the silhouette from the third direction.' },
+    ],
   },
 ]
 
-const newAngle = (label) => ({
+const newAngle = ({ label, guide = '' }) => ({
   id: `${label}-${Math.random().toString(36).slice(2, 8)}`,
   label,
+  guide,
   files: [],
 })
 
@@ -69,7 +126,7 @@ const initialSections = () =>
   Object.fromEntries(
     SECTIONS.map((section) => [
       section.key,
-      section.angles.map((label) => newAngle(label)),
+      section.angles.map((angle) => newAngle(angle)),
     ]),
   )
 
@@ -211,9 +268,9 @@ function CaptureSection({ section, index, angles, setAngles, onError, busy }) {
       </header>
 
       <div className="capture-body">
+        <p className="spec">{section.spec}</p>
         <p className="muted small" style={{ marginBottom: 14 }}>
-          <strong style={{ color: 'var(--ink-2)' }}>{section.needs}</strong>{' '}
-          {section.watch}
+          {section.limit}
         </p>
 
         <div className="angles">
@@ -227,15 +284,16 @@ function CaptureSection({ section, index, angles, setAngles, onError, busy }) {
                   aria-label="Angle name"
                   disabled={busy}
                 />
-                <span className="muted small" style={{ flex: 1 }}>
-                  {angle.files.length
-                    ? `${angle.files.length} file${angle.files.length > 1 ? 's' : ''}`
-                    : ''}
-                </span>
+                {angle.files.length > 0 && (
+                  <span className="angle-count muted small">
+                    {angle.files.length} file{angle.files.length > 1 ? 's' : ''}
+                  </span>
+                )}
                 {angles.length > 1 && (
                   <button
                     type="button"
                     className="btn-icon"
+                    aria-label={`Remove the ${angle.label} angle`}
                     title="Remove this angle"
                     onClick={() =>
                       setAngles(angles.filter((entry) => entry.id !== angle.id))
@@ -246,6 +304,8 @@ function CaptureSection({ section, index, angles, setAngles, onError, busy }) {
                   </button>
                 )}
               </div>
+
+              {angle.guide && <p className="angle-guide">{angle.guide}</p>}
 
               <DropZone
                 accept={accept}
@@ -288,7 +348,9 @@ function CaptureSection({ section, index, angles, setAngles, onError, busy }) {
           <button
             type="button"
             className="btn btn-quiet btn-small"
-            onClick={() => setAngles([...angles, newAngle('Another angle')])}
+            onClick={() =>
+              setAngles([...angles, newAngle({ label: 'Another angle' })])
+            }
             disabled={busy}
           >
             + Add angle

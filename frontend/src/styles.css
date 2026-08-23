@@ -19,7 +19,11 @@
   --paper-3: #f2f2f2;
   --ink: #111111;
   --ink-2: #444444;
-  --ink-3: #767676;
+  /* 5.3:1 on --paper. The obvious choice, #767676, measures 4.35:1 and misses
+     the 4.5:1 minimum for body text — which matters more here than it would
+     elsewhere, because with no colour in the design contrast is the only tool
+     left for separating primary text from secondary. */
+  --ink-3: #6a6a6a;
   --line: #e2e2e2;
   --line-2: #cfcfcf;
 
@@ -108,8 +112,8 @@ code {
   letter-spacing: 0.02em;
 }
 
-.session { display: flex; align-items: center; gap: 14px; }
-.session-who { font-size: 0.8125rem; color: var(--ink-3); text-align: right; }
+.session { display: flex; align-items: center; gap: 12px; }
+.session-who { font-size: 0.8125rem; color: var(--ink-3); white-space: nowrap; }
 .session-who strong { color: var(--ink); font-weight: 600; }
 
 /* --- navigation ----------------------------------------------------------- */
@@ -259,14 +263,27 @@ select:focus {
 }
 input::placeholder, textarea::placeholder { color: #a8a8a8; }
 
+/* The label is the click target, not just the 17px box, so it carries the
+   minimum height rather than the input doing so. */
 label.checkbox {
   display: flex;
   align-items: flex-start;
   gap: 9px;
+  min-height: 24px;
+  padding: 3px 0;
   font-size: 0.8125rem;
   color: var(--ink-2);
+  cursor: pointer;
 }
-label.checkbox input { margin-top: 3px; accent-color: var(--ink); }
+label.checkbox input {
+  margin-top: 1px;
+  accent-color: var(--ink);
+  /* 13px by default, which is below the minimum target size and fiddly on a
+     laptop trackpad. */
+  width: 17px;
+  height: 17px;
+  flex: 0 0 17px;
+}
 
 /* --- buttons -------------------------------------------------------------- */
 
@@ -298,15 +315,22 @@ label.checkbox input { margin-top: 3px; accent-color: var(--ink); }
 .btn-small { padding: 4px 10px; font-size: 0.75rem; }
 .btn-block { width: 100%; }
 
+/* 28px square. At 25x20 this was under the 24x24 minimum, which is small
+   enough to miss with a trackpad and much smaller than it looks on a phone. */
 .btn-icon {
   border: none;
   background: none;
   color: var(--ink-3);
   cursor: pointer;
   font: inherit;
-  font-size: 1rem;
+  font-size: 0.9rem;
   line-height: 1;
-  padding: 2px 6px;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   border-radius: 2px;
 }
 .btn-icon:hover { color: var(--ink); background: var(--paper-3); }
@@ -398,6 +422,17 @@ label.checkbox input { margin-top: 3px; accent-color: var(--ink); }
 }
 .capture-status.filled { border-color: var(--ink); color: var(--ink); }
 
+/* What the model actually requires, in numbers. Stated before the caveats,
+   because it is the part somebody has to act on. */
+.spec {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--ink);
+  border-left: 2px solid var(--ink);
+  padding-left: 10px;
+  margin-bottom: 8px;
+}
+
 /* Angle slots within a section. */
 .angles { display: flex; flex-direction: column; gap: 10px; }
 .angle {
@@ -406,21 +441,29 @@ label.checkbox input { margin-top: 3px; accent-color: var(--ink); }
   padding: 12px;
   background: var(--paper-2);
 }
+
+/* Not a full-width row. The name, its file count and its delete button belong
+   together: stretched across a 1080px card, the ✕ ended up some 700px from
+   the thing it removes. */
 .angle-head {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 8px;
-}
-.angle-head .angle-name {
-  font-size: 0.8125rem;
-  font-weight: 600;
-  flex: 1;
+  gap: 6px;
+  margin-bottom: 6px;
 }
 .angle-head input[type="text"] {
   font-size: 0.8125rem;
-  padding: 4px 8px;
-  max-width: 200px;
+  font-weight: 600;
+  padding: 5px 8px;
+  width: 190px;
+}
+.angle-count { white-space: nowrap; }
+
+.angle-guide {
+  font-size: 0.75rem;
+  color: var(--ink-3);
+  margin: 0 0 8px;
+  max-width: 62ch;
 }
 
 /* --- requirements table --------------------------------------------------- */
