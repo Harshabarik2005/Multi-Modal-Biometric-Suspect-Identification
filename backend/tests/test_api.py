@@ -22,8 +22,7 @@ from app.db.repository import (
 
 
 @pytest.fixture
-def repo(monkeypatch):
-    monkeypatch.delenv("FRS_TEMPLATE_ENCRYPTION_KEY", raising=False)
+def repo():
     engine = make_engine("sqlite:///:memory:")
     create_schema(engine)
     session = session_factory(engine)()
@@ -119,9 +118,18 @@ class TestTemplateEncryption:
         )
         session.close()
 
-    def test_plaintext_is_flagged_as_unencrypted(self, repo) -> None:
+    def test_plaintext_is_flagged_as_unencrypted(self, monkeypatch) -> None:
+        """The escape hatch writes plaintext, and says so on the row."""
+        monkeypatch.delenv("FRS_TEMPLATE_ENCRYPTION_KEY", raising=False)
+        monkeypatch.setenv("FRS_ALLOW_PLAINTEXT_TEMPLATES", "1")
+        engine = make_engine("sqlite:///:memory:")
+        create_schema(engine)
+        session = session_factory(engine)()
+        repo = WatchlistRepository(session)
+
         enroll(repo)
         assert all(not t.encrypted for t in repo.get_person("ravi").templates)
+        session.close()
 
 
 class TestRetirement:

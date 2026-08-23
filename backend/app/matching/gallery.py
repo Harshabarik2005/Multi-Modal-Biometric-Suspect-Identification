@@ -42,6 +42,56 @@ from app.core.types import (
 logger = get_logger(__name__)
 
 TEMPLATE_KEY_ENV = "FRS_TEMPLATE_ENCRYPTION_KEY"
+
+#: SEC-06. Encryption at rest used to be opt-in: with no key, templates were
+#: written as plain float32 vectors and a warning went to a log nobody reads.
+#: That made the insecure state the default, and because encryption is recorded
+#: per row a deployment could end up half-encrypted and still look right in a
+#: spot check. Writing now refuses unless a key is configured, or this is set
+#: to make the choice deliberate and visible.
+ALLOW_PLAINTEXT_ENV = "FRS_ALLOW_PLAINTEXT_TEMPLATES"
+
+
+def plaintext_is_permitted() -> bool:
+    return os.environ.get(ALLOW_PLAINTEXT_ENV, "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+
+
+def refuse_plaintext(what: str) -> None:
+    """Raise unless writing unencrypted biometric data has been opted into.
+
+    Called on the write path only. Reading plaintext templates that already
+    exist still works, because refusing to read them would strand data someone
+    has to migrate rather than protecting anything.
+    """
+    if plaintext_is_permitted():
+        logger.warning(
+            "Writing %s UNENCRYPTED because %s is set. This is biometric data; "
+            "do not use this setting outside local development.",
+            what,
+            ALLOW_PLAINTEXT_ENV,
+        )
+        return
+
+    raise RuntimeError(
+        f"""Refusing to write {what} unencrypted.
+
+These are biometric templates -- they identify a real person and cannot be
+reissued like a password.
+
+Set an encryption key:
+  python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'
+  export {TEMPLATE_KEY_ENV}=<that key>
+
+Keep the key somewhere other than the database it protects; without it the
+enrolments cannot be read back.
+
+For local development with throwaway data only, set {ALLOW_PLAINTEXT_ENV}=1 to write
+plaintext deliberately."""
+    )
 _ENCRYPTED_MAGIC = b"FRSENC1:"
 
 #: person_id becomes a directory name under `paths.enrollment_dir`, so it has
@@ -440,11 +490,7 @@ class GalleryStore:
 
         fernet = self._fernet()
         if fernet is None:
-            logger.warning(
-                "Writing biometric templates UNENCRYPTED. Section 8 of the build "
-                "plan requires encryption at rest. Set %s to enable it.",
-                TEMPLATE_KEY_ENV,
-            )
+            refuse_plaintext("gallery templates")
             return raw
         return _ENCRYPTED_MAGIC + fernet.encrypt(raw)
 

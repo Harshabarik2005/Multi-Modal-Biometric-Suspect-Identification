@@ -360,7 +360,13 @@ class TestGalleryStore:
     def test_plaintext_still_loads_when_no_key_is_set(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Records written before encryption was required must stay readable.
+
+        Refusing to *read* them would strand data someone has to migrate
+        rather than protect anything.
+        """
         monkeypatch.delenv("FRS_TEMPLATE_ENCRYPTION_KEY", raising=False)
+        monkeypatch.setenv("FRS_ALLOW_PLAINTEXT_TEMPLATES", "1")
         store = self._store(tmp_path)
         store.save(self._person())
         assert store.load_person("ravi").person_id == "ravi"
@@ -370,6 +376,7 @@ class TestGalleryStore:
     ) -> None:
         """One unreadable record must not take the whole watchlist down."""
         monkeypatch.delenv("FRS_TEMPLATE_ENCRYPTION_KEY", raising=False)
+        monkeypatch.setenv("FRS_ALLOW_PLAINTEXT_TEMPLATES", "1")
         store = self._store(tmp_path)
         store.save(self._person())
 

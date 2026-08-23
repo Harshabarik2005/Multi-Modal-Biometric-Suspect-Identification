@@ -169,9 +169,16 @@ encrypted at rest. Generate a key and put it in your environment:
 python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
-Set it as `FRS_TEMPLATE_ENCRYPTION_KEY` (see `.env.example`). Without it,
-enrollment still works but warns on every save, and templates sit on disk in
-the clear. Records encrypted with a key cannot be read back without it.
+Set it as `FRS_TEMPLATE_ENCRYPTION_KEY` (see `.env.example`).
+
+**Enrollment refuses to write without a key.** It used to warn and write
+plaintext, which made the insecure state the default and — because encryption
+is recorded per template — let a database end up half-encrypted while still
+looking right in a spot check. For local work with throwaway data, set
+`FRS_ALLOW_PLAINTEXT_TEMPLATES=1` to make that choice deliberate.
+
+Keep the key somewhere other than the database it protects: records encrypted
+with a key cannot be read back without it.
 
 ## Tests
 
@@ -267,16 +274,16 @@ convention:
 
 | Guardrail | How it is enforced |
 |---|---|
-| No action on a match alone | Matches are always created `pending`; the only route to `confirmed` is `POST /decisions/{id}/review` with a named operator |
+| No action on a match alone | Matches are always created `pending`; the only route to `confirmed` is `POST /decisions/{id}/review`, and the operator recorded is the authenticated session, not a name in the request body |
 | Alerting sees confirmed only | `/alerts` returns confirmed decisions; a pending one is invisible to it |
 | Audit trail is append-only | A review adds a row; it never edits the decision, so a change of mind leaves both judgements visible |
 | Templates stay private | The API describes templates but never returns a vector |
 | Removal preserves history | `DELETE /watchlist/{id}` retires rather than deletes, so past decisions stay reviewable |
 
-**Set `FRS_TEMPLATE_ENCRYPTION_KEY` before enrolling anyone through the API**,
-or templates are written unencrypted and every write logs a warning saying so.
-The database file is git-ignored — it holds biometric templates and the whole
-audit trail.
+**Set `FRS_TEMPLATE_ENCRYPTION_KEY` before enrolling anyone through the API.**
+Without it, enrollment is refused rather than falling back to plaintext. The
+database file is git-ignored — it holds biometric templates and the whole audit
+trail.
 
 ## Enrol and search from the browser
 
@@ -290,6 +297,18 @@ cd frontend && npm install && npm run dev
 ```
 
 Open `http://localhost:5173`.
+
+**You need an account to get in.** There is no self-registration, deliberately:
+shell access to the host is the right bar for a system that can confirm an
+identification of a real person. Create the first one on the server:
+
+```bash
+cd backend && python scripts/manage_operators.py --create <username> --admin
+```
+
+Everything you confirm or reject is recorded against that account, and the
+server takes the identity from your session rather than from the request — a
+review cannot claim to be someone else's.
 
 **Enrol someone** — upload photos or video, or record straight from the webcam.
 "Check what this covers" runs detection only and takes seconds; it tells you

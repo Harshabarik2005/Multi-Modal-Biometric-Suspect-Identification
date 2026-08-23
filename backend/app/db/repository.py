@@ -39,6 +39,7 @@ from app.matching.gallery import (
     Gallery,
     GalleryStore,
     PersonRecord,
+    refuse_plaintext,
 )
 
 logger = get_logger(__name__)
@@ -91,11 +92,7 @@ class WatchlistRepository:
 
         fernet = self.crypto._fernet()
         if fernet is None:
-            logger.warning(
-                "Storing a biometric template UNENCRYPTED. Section 8 of the "
-                "build plan requires encryption at rest. Set %s.",
-                TEMPLATE_KEY_ENV,
-            )
+            refuse_plaintext("a biometric template")
             return raw, False
         return _ENCRYPTED_MAGIC + fernet.encrypt(raw), True
 

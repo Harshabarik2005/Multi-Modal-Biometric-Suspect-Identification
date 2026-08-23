@@ -246,3 +246,78 @@ class TestJobListingDoesNotLeak:
 
         listing = client.get("/api/jobs").json()
         assert all("secret" not in (entry["error"] or "") for entry in listing)
+
+
+class TestEncryptionIsNotOptional:
+    """SEC-06: plaintext biometric templates used to be the default.
+
+    With no key the code wrote raw float32 vectors and logged a warning, so
+    every default deployment stored biometric data in the clear. Worse, because
+    encryption is recorded per row, a deployment could be half-encrypted and
+    still look right in a spot check.
+    """
+
+    @staticmethod
+    def _no_key(monkeypatch) -> None:
+        monkeypatch.delenv("FRS_TEMPLATE_ENCRYPTION_KEY", raising=False)
+        monkeypatch.delenv("FRS_ALLOW_PLAINTEXT_TEMPLATES", raising=False)
+
+    def test_a_gallery_write_without_a_key_is_refused(self, monkeypatch) -> None:
+        from app.matching.gallery import GalleryStore
+
+        self._no_key(monkeypatch)
+        store = GalleryStore.__new__(GalleryStore)
+        with pytest.raises(RuntimeError, match="unencrypted"):
+            store._encode_vectors({"face": np.zeros(4, dtype=np.float32)})
+
+    def test_a_template_write_without_a_key_is_refused(self, monkeypatch) -> None:
+        from app.db.repository import WatchlistRepository, create_schema, session_factory
+
+        self._no_key(monkeypatch)
+        engine = make_engine("sqlite:///:memory:")
+        create_schema(engine)
+        session = session_factory(engine)()
+        repo = WatchlistRepository(session)
+        try:
+            with pytest.raises(RuntimeError, match="unencrypted"):
+                repo._encode(np.zeros(4, dtype=np.float32))
+        finally:
+            session.close()
+
+    def test_the_refusal_says_how_to_fix_it(self, monkeypatch) -> None:
+        """An error nobody can act on just gets worked around."""
+        from app.matching.gallery import refuse_plaintext
+
+        self._no_key(monkeypatch)
+        with pytest.raises(RuntimeError) as caught:
+            refuse_plaintext("a biometric template")
+
+        message = str(caught.value)
+        assert "FRS_TEMPLATE_ENCRYPTION_KEY" in message
+        assert "Fernet.generate_key" in message
+        assert "FRS_ALLOW_PLAINTEXT_TEMPLATES" in message
+
+    def test_the_escape_hatch_is_explicit(self, monkeypatch) -> None:
+        """Local development can still write plaintext, but only on purpose."""
+        from app.matching.gallery import GalleryStore
+
+        self._no_key(monkeypatch)
+        monkeypatch.setenv("FRS_ALLOW_PLAINTEXT_TEMPLATES", "1")
+
+        store = GalleryStore.__new__(GalleryStore)
+        blob = store._encode_vectors({"face": np.zeros(4, dtype=np.float32)})
+        assert not blob.startswith(b"FRSENC1:")
+
+    def test_a_key_is_enough_on_its_own(self, monkeypatch) -> None:
+        """The opt-out is not needed when encryption is actually configured."""
+        from cryptography.fernet import Fernet
+
+        from app.matching.gallery import GalleryStore
+
+        monkeypatch.setenv("FRS_TEMPLATE_ENCRYPTION_KEY", Fernet.generate_key().decode())
+        monkeypatch.delenv("FRS_ALLOW_PLAINTEXT_TEMPLATES", raising=False)
+
+        store = GalleryStore.__new__(GalleryStore)
+        assert store._encode_vectors(
+            {"face": np.zeros(4, dtype=np.float32)}
+        ).startswith(b"FRSENC1:")

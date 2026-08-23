@@ -49,8 +49,7 @@ class RecordingNotifier(Notifier):
 
 
 @pytest.fixture
-def repo(monkeypatch):
-    monkeypatch.delenv("FRS_TEMPLATE_ENCRYPTION_KEY", raising=False)
+def repo():
     engine = make_engine("sqlite:///:memory:")
     create_schema(engine)
     session = session_factory(engine)()

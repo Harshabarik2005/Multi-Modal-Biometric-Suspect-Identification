@@ -31,6 +31,21 @@ def pytest_collection_modifyitems(
             item.add_marker(skip)
 
 
+@pytest.fixture(autouse=True)
+def template_encryption_key(monkeypatch):
+    """Give every test a throwaway encryption key.
+
+    Writing biometric templates unencrypted is refused unless it is explicitly
+    opted into (SEC-06), so the tests run the same path production does rather
+    than a plaintext one that would never be exercised in a deployment. Tests
+    about the plaintext path clear this themselves.
+    """
+    from cryptography.fernet import Fernet
+
+    monkeypatch.setenv("FRS_TEMPLATE_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    monkeypatch.delenv("FRS_ALLOW_PLAINTEXT_TEMPLATES", raising=False)
+
+
 @pytest.fixture
 def blank_frame() -> np.ndarray:
     """A 480x640 BGR frame of mid-grey."""
@@ -86,7 +101,6 @@ TEST_PASSWORD = "test-password-1234"
 
 @pytest.fixture
 def api_engine(monkeypatch):
-    monkeypatch.delenv("FRS_TEMPLATE_ENCRYPTION_KEY", raising=False)
     # A fixed signing key, so tokens are stable within a test run.
     monkeypatch.setenv("FRS_AUTH_SECRET", "test-signing-secret-not-for-real-use")
 
