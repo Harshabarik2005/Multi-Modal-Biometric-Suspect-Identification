@@ -828,3 +828,27 @@ class TestTheReviewerCanSeeThePerson:
             assert repo.decision_evidence(decision.id) is not None
         finally:
             session.close()
+
+
+class TestThePreviewDoesNotBlockTheServer:
+    """SEC-09, second half: an async route running YOLO inline.
+
+    `preview_enrollment` is `async def` but the work inside is detection on
+    every frame -- seconds of pure CPU. Running it inline blocked every other
+    request for the duration, including the job-status polls the browser makes
+    while a scan is running.
+    """
+
+    def test_the_detection_work_is_offloaded(self) -> None:
+        source = (
+            Path(__file__).resolve().parents[1] / "app" / "api" / "ingest.py"
+        ).read_text(encoding="utf-8")
+
+        preview = source[source.index("async def preview_enrollment") :]
+        preview = preview[: preview.index("\n@router")]
+
+        assert "run_in_threadpool" in preview, (
+            "preview runs detection on the event loop, stalling every other "
+            "request on the server"
+        )
+        assert "await run_in_threadpool(\n            observations_from_uploads" in preview

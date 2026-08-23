@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -239,7 +240,15 @@ async def preview_enrollment(
     """
     directory, paths = await _stage(files)
     try:
-        observations, summary = observations_from_uploads(paths, settings)
+        # Off the event loop. This route is `async def` but the work inside is
+        # YOLO on every frame -- seconds of pure CPU -- so running it inline
+        # blocked every other request on the server for the duration,
+        # including the job-status polls the browser makes during a scan
+        # (SEC-09). Enrolment and scanning avoid this by being jobs; preview
+        # is meant to be quick, which is not the same as being cheap.
+        observations, summary = await run_in_threadpool(
+            observations_from_uploads, paths, settings
+        )
         readiness = assess_readiness(summary, settings)
 
         warning = ""

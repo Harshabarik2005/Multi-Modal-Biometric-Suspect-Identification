@@ -377,3 +377,70 @@ enrolment reference.
 - **The comments are unusually honest about limits.** Several findings above are things the
   docstrings describe correctly and the implementation then fails to do — a much better position
   to be in than the reverse.
+
+---
+
+## Status
+
+All 29 findings are addressed. Each fix carries its finding id in a comment at
+the place it applies, and a regression test named for it; `grep -rn SEC-06
+backend/` finds the code and the test together.
+
+| id | verdict | where |
+|---|---|---|
+| SEC-01 | authentication added | `app/api/auth.py`, `Login.jsx` |
+| SEC-02 | job settings deep-copied | `app/api/ingest.py` |
+| SEC-03 | `weights_only=True` | `app/embeddings/reid.py`, `app/fusion/attention.py` |
+| SEC-04 | person id validated at the boundary | `app/matching/gallery.py` |
+| SEC-05 | TLS context on SMTP | `app/alerts/notifier.py` |
+| SEC-06 | plaintext templates refused | `app/matching/gallery.py` |
+| SEC-07 | bounded | `app/api/ingest.py` |
+| SEC-08 | job listings withhold results | `app/api/ingest.py` |
+| SEC-09 | cap restored; preview off the event loop | `app/api/media.py`, `app/api/ingest.py` |
+| SEC-10 | explicit buffer config, no shared mutation | `app/api/media.py` |
+| SEC-11 | cleanup owned by the runner + startup sweep | `app/api/jobs.py`, `app/api/ingest.py` |
+| SEC-12 | addressed | `app/api/main.py` |
+| LOG-01 | corrected | `app/matching/gallery.py` |
+| LOG-02 | verdict only when coverage matches | `eval/ablation.py` |
+| LOG-03 | trust resolved per person inside `rank` | `app/matching/gallery.py` |
+| LOG-04 | photos no longer counted toward gait | `app/api/media.py` |
+| LOG-05 | corrected | `app/embeddings/gait.py` |
+| LOG-06 | cadence measured in seconds; coarse streams refused | `app/embeddings/gait.py` |
+| LOG-07 | writer uses the source frame rate | `app/pipeline.py` |
+| LOG-08 | audit query filtered on kind, unbounded | `app/alerts/notifier.py` |
+| LOG-09 | overturns marked | `app/db/repository.py` |
+| LOG-10 | one decision per track | `scripts/match.py` |
+| LOG-11 | one shared threshold, EER fallback | `eval/metrics.py` |
+| LOG-12 | strategy taken from the `FusionResult` | `app/api/scanning.py`, `scripts/match.py` |
+| LOG-13 | cross-group pairs excluded | `eval/ablation.py` |
+| LOG-14 | upload filenames de-duplicated | `app/api/ingest.py` |
+| DES-01 | re-ID weights loaded; model recorded per template | `app/embeddings/reid.py` |
+| DES-02 | the reviewer sees the person | `app/core/evidence.py`, `App.jsx` |
+| DES-03 | polling bounded | `frontend/src/api.js` |
+
+### What the fixes did not settle
+
+**The re-ID anchors are measured, but from one photograph of two people.**
+DES-01 established that the branch was running ImageNet weights and replaced
+them; `reid_impostor`, `reid_genuine` and `reid_threshold` were then
+re-measured under the correct model. The measurement is real and the old
+threshold turned out to sit on top of the genuine score, which is worth
+knowing. But two subjects is not a calibration. `fusion.reid_anchors_measured_on`
+records what the numbers describe, and a mismatch with `reid.weights` is
+reported to the operator; that makes the gap visible rather than closed.
+
+**Authentication is single-factor with no password policy, lockout, or
+revocation before token expiry.** SEC-01 closed the gap between "anyone on the
+network" and "someone who knows a password". A deployment holding real
+biometric data needs more than that, and this line should stay open.
+
+**Evidence retention has a mechanism and no policy.** `purge_evidence(days)`
+exists and nothing calls it. That is deliberate — how long to keep photographs
+of people is not a default this code should pick — but a deployment that never
+calls it keeps them forever.
+
+**Nothing here has been validated on real footage.** Every measurement in this
+repository comes from two Ultralytics sample images and a panned still. The
+fixes are correct in the sense that the code now does what its comments claim;
+whether the system identifies people accurately is a question no test in this
+repository can answer.
