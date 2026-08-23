@@ -113,6 +113,81 @@ function EvidenceCaution({ weights }) {
  * Review queue
  * ------------------------------------------------------------------ */
 
+/**
+ * The two pictures a reviewer needs: who was seen, and who they are supposed
+ * to be (DES-02).
+ *
+ * Before this, the review card showed a score, some weight bars and a caution
+ * line. The human confirmation is the safeguard the whole architecture is
+ * built around, and the human could see *how* the system reached its
+ * conclusion but had no way to judge *whether* it was right. Confirming an
+ * identification of someone you have never seen is not a check.
+ *
+ * When an image is missing that is stated rather than hidden. A reviewer being
+ * asked to decide without evidence needs to know that is what is happening.
+ */
+function EvidencePair({ decision, onError }) {
+  const [images, setImages] = useState(null)
+
+  useEffect(() => {
+    let cancelled = false
+    let urls = []
+
+    Promise.all([
+      decision.has_evidence ? api.evidenceImage(decision.id) : null,
+      decision.has_reference ? api.referenceImage(decision.person_id) : null,
+    ])
+      .then(([seen, enrolled]) => {
+        if (cancelled) {
+          urls = [seen, enrolled].filter(Boolean)
+          return
+        }
+        urls = [seen, enrolled].filter(Boolean)
+        setImages({ seen, enrolled })
+      })
+      .catch((error) => {
+        if (!cancelled) onError?.(error.message)
+      })
+
+    return () => {
+      cancelled = true
+      urls.forEach((url) => URL.revokeObjectURL(url))
+    }
+  }, [decision.id, decision.person_id, decision.has_evidence, decision.has_reference])
+
+  return (
+    <div className="evidence">
+      <figure className="evidence-pane">
+        <figcaption className="muted small">Seen on camera</figcaption>
+        {images?.seen ? (
+          <img src={images.seen} alt="The person detected in the footage" />
+        ) : (
+          <div className="evidence-missing">
+            {decision.has_evidence
+              ? 'Loading…'
+              : 'No image was captured for this match.'}
+          </div>
+        )}
+      </figure>
+
+      <figure className="evidence-pane">
+        <figcaption className="muted small">
+          Enrolled as {decision.display_name}
+        </figcaption>
+        {images?.enrolled ? (
+          <img src={images.enrolled} alt={`Enrolment reference for ${decision.display_name}`} />
+        ) : (
+          <div className="evidence-missing">
+            {decision.has_reference
+              ? 'Loading…'
+              : 'No enrolment image was stored.'}
+          </div>
+        )}
+      </figure>
+    </div>
+  )
+}
+
 function DecisionCard({ decision, onReviewed, onError }) {
   const [reason, setReason] = useState('')
   const [busy, setBusy] = useState(false)
@@ -147,6 +222,15 @@ function DecisionCard({ decision, onReviewed, onError }) {
           <span className="muted small">fused score</span>
         </div>
       </header>
+
+      <EvidencePair decision={decision} onError={onError} />
+
+      {!decision.has_evidence && (
+        <p className="caution">
+          There is no image of this sighting, so the only thing to judge is the
+          score. Reject unless you have another way to verify it.
+        </p>
+      )}
 
       <WeightBreakdown
         weights={decision.weights}

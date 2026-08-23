@@ -73,6 +73,13 @@ class Person(Base):
     notes: Mapped[str] = mapped_column(Text, default="")
     source: Mapped[str] = mapped_column(Text, default="")
 
+    #: One representative crop from the enrolment footage, JPEG, encrypted.
+    #: Shown beside the match so a reviewer is comparing two pictures rather
+    #: than trusting a number (DES-02).
+    reference_jpeg: Mapped[bytes | None] = mapped_column(
+        LargeBinary, nullable=True, default=None
+    )
+
     enrolled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     # Set rather than deleting the row: match decisions reference this person,
     # and an audit trail with dangling references is not auditable.
@@ -155,6 +162,18 @@ class MatchDecision(Base):
     weights_json: Mapped[str] = mapped_column(Text, default="{}")
     #: JSON: per-modality calibrated scores, for the same reason.
     calibrated_json: Mapped[str] = mapped_column(Text, default="{}")
+
+    #: The crop this match was made on, JPEG, encrypted like a template
+    #: (DES-02). The review card previously showed a score and some weight
+    #: bars and no image at all, so the human whose confirmation the whole
+    #: design rests on could judge how the system reached its conclusion but
+    #: not whether it was right.
+    #:
+    #: Nullable: a decision recorded before this existed, or one where the
+    #: frame could not be encoded, still has to load.
+    evidence_jpeg: Mapped[bytes | None] = mapped_column(
+        LargeBinary, nullable=True, default=None
+    )
 
     status: Mapped[DecisionStatus] = mapped_column(
         Enum(DecisionStatus), default=DecisionStatus.PENDING, index=True

@@ -110,21 +110,34 @@ def api_engine(monkeypatch):
 
 
 @pytest.fixture
-def anon_client(api_engine):
-    """A client with no credentials."""
-    from fastapi.testclient import TestClient
-
+def api_app(api_engine):
+    """One app instance, shared by the signed-in and anonymous clients."""
     from app.api.main import create_app
 
-    app = create_app(engine=api_engine)
-    with TestClient(app) as client:
+    return create_app(engine=api_engine)
+
+
+@pytest.fixture
+def anon_client(api_app, api_engine):
+    """A client with no credentials.
+
+    A separate TestClient rather than the same one with its header stripped.
+    `api_client` used to be built by mutating this object, so a test asking for
+    both got one authenticated client under two names -- and a test asserting
+    "this route is locked" passed while proving nothing.
+    """
+    from fastapi.testclient import TestClient
+
+    with TestClient(api_app) as client:
         client.engine = api_engine
         yield client
 
 
 @pytest.fixture
-def api_client(anon_client, api_engine):
+def api_client(api_app, api_engine):
     """A client signed in as a test operator."""
+    from fastapi.testclient import TestClient
+
     from app.api.auth import create_operator
     from app.db.repository import session_factory
 
@@ -133,15 +146,19 @@ def api_client(anon_client, api_engine):
         create_operator(
             session, TEST_OPERATOR, TEST_PASSWORD, display_name="Tester", is_admin=True
         )
+    except ValueError:
+        pass  # another client in this test created it already
     finally:
         session.close()
 
-    response = anon_client.post(
-        "/api/auth/login",
-        json={"username": TEST_OPERATOR, "password": TEST_PASSWORD},
-    )
-    assert response.status_code == 200, response.text
-    anon_client.headers.update(
-        {"Authorization": f"Bearer {response.json()['token']}"}
-    )
-    return anon_client
+    with TestClient(api_app) as client:
+        client.engine = api_engine
+        response = client.post(
+            "/api/auth/login",
+            json={"username": TEST_OPERATOR, "password": TEST_PASSWORD},
+        )
+        assert response.status_code == 200, response.text
+        client.headers.update(
+            {"Authorization": f"Bearer {response.json()['token']}"}
+        )
+        yield client

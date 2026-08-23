@@ -39,6 +39,7 @@ from app.api.media import (
     observations_from_uploads,
 )
 from app.core.config import Settings, get_settings
+from app.core.evidence import best_reference_crop
 from app.core.logging import get_logger
 from app.core.types import Modality
 from app.db.repository import WatchlistRepository
@@ -382,6 +383,9 @@ async def enroll(
                 source=f"{summary.videos} video(s), {summary.images} image(s)",
                 actor=operator_name,
                 replace=replace,
+                # One crop from the enrolment, so a reviewer judging a later
+                # match has something to compare it against (DES-02).
+                reference_jpeg=best_reference_crop(observations),
             )
 
             return {

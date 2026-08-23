@@ -660,3 +660,171 @@ class TestUploadedFootageIsAlwaysDeleted:
         assert not old.exists()
         assert fresh.exists(), "deleting an in-flight upload would break a request"
         assert other.exists()
+
+
+class TestTheReviewerCanSeeThePerson:
+    """DES-02: the review card showed a score and no image.
+
+    The human confirmation is the safeguard the whole architecture rests on.
+    Without a picture the reviewer can see *how* the system reached its
+    conclusion but not *whether* it is right, which makes the safeguard a
+    formality that produces an audit trail saying a human checked.
+    """
+
+    @staticmethod
+    def _crop(height: int = 400, width: int = 160) -> np.ndarray:
+        rng = np.random.default_rng(7)
+        return rng.integers(0, 255, (height, width, 3), dtype=np.uint8)
+
+    @classmethod
+    def _encoded(cls) -> bytes:
+        from app.core.evidence import encode_crop
+
+        return encode_crop(cls._crop())
+
+    def _repo(self, engine):
+        from app.core.types import Modality, ModalityEmbedding
+        from app.db.repository import WatchlistRepository, session_factory
+
+        session = session_factory(engine)()
+        repo = WatchlistRepository(session)
+        repo.enroll(
+            "ravi",
+            "Ravi Kumar",
+            {
+                Modality.FACE: ModalityEmbedding(
+                    modality=Modality.FACE,
+                    vector=np.ones(8, dtype=np.float32),
+                    quality=0.9,
+                    frames_used=5,
+                )
+            },
+            reference_jpeg=self._encoded(),
+        )
+        return repo, session
+
+    def test_a_crop_round_trips_through_the_decision(self, client) -> None:
+        repo, session = self._repo(client.engine)
+        try:
+            original = self._encoded()
+            decision = repo.record_match(
+                "ravi", track_id=1, score=0.9, evidence_jpeg=original
+            )
+            assert repo.decision_evidence(decision.id) == original
+        finally:
+            session.close()
+
+    def test_the_stored_image_is_encrypted(self, client) -> None:
+        """A picture of an identified person is personal data too."""
+        repo, session = self._repo(client.engine)
+        try:
+            decision = repo.record_match(
+                "ravi", track_id=1, score=0.9, evidence_jpeg=self._encoded()
+            )
+            session.refresh(decision)
+            assert decision.evidence_jpeg.startswith(b"FRSENC1:")
+            assert b"\xff\xd8\xff" not in decision.evidence_jpeg[:64]
+        finally:
+            session.close()
+
+    def test_the_routes_serve_both_images(self, client) -> None:
+        repo, session = self._repo(client.engine)
+        try:
+            decision = repo.record_match(
+                "ravi", track_id=1, score=0.9, evidence_jpeg=self._encoded()
+            )
+        finally:
+            session.close()
+
+        seen = client.get(f"/api/decisions/{decision.id}/evidence")
+        assert seen.status_code == 200
+        assert seen.headers["content-type"] == "image/jpeg"
+        assert seen.content.startswith(b"\xff\xd8\xff")
+
+        enrolled = client.get("/api/watchlist/ravi/reference")
+        assert enrolled.status_code == 200
+        assert enrolled.content.startswith(b"\xff\xd8\xff")
+
+    def test_images_require_a_session(self, anon_client, client) -> None:
+        repo, session = self._repo(client.engine)
+        try:
+            decision = repo.record_match(
+                "ravi", track_id=1, score=0.9, evidence_jpeg=self._encoded()
+            )
+        finally:
+            session.close()
+
+        assert (
+            anon_client.get(f"/api/decisions/{decision.id}/evidence").status_code
+            == 401
+        )
+        assert anon_client.get("/api/watchlist/ravi/reference").status_code == 401
+
+    def test_a_missing_image_is_reported_not_faked(self, client) -> None:
+        """A reviewer deciding without evidence must know that is the case."""
+        repo, session = self._repo(client.engine)
+        try:
+            decision = repo.record_match("ravi", track_id=2, score=0.9)
+        finally:
+            session.close()
+
+        assert (
+            client.get(f"/api/decisions/{decision.id}/evidence").status_code == 404
+        )
+        listed = client.get(f"/api/decisions/{decision.id}").json()
+        assert listed["has_evidence"] is False
+        assert listed["has_reference"] is True
+
+    def test_the_listing_flags_images_without_carrying_them(self, client) -> None:
+        """A hundred pending decisions must not mean a hundred JPEGs inline."""
+        repo, session = self._repo(client.engine)
+        try:
+            repo.record_match(
+                "ravi", track_id=1, score=0.9, evidence_jpeg=self._encoded()
+            )
+        finally:
+            session.close()
+
+        body = client.get("/api/decisions").json()
+        assert body[0]["has_evidence"] is True
+        assert "evidence_jpeg" not in body[0]
+
+    def test_evidence_can_be_purged_without_losing_the_decision(self, client) -> None:
+        """Keeping photographs indefinitely is not the same as keeping a trail."""
+        from datetime import datetime, timedelta, timezone
+
+        from app.db.models import DecisionStatus, MatchDecision
+
+        repo, session = self._repo(client.engine)
+        try:
+            decision = repo.record_match(
+                "ravi", track_id=1, score=0.9, evidence_jpeg=self._encoded()
+            )
+            repo.review(decision.id, "alice", DecisionStatus.CONFIRMED)
+
+            session.execute(
+                MatchDecision.__table__.update()
+                .where(MatchDecision.id == decision.id)
+                .values(created_at=datetime.now(timezone.utc) - timedelta(days=400))
+            )
+            session.commit()
+
+            assert repo.purge_evidence(older_than_days=365) == 1
+            assert repo.decision_evidence(decision.id) is None
+
+            kept = session.get(MatchDecision, decision.id)
+            assert kept.score == pytest.approx(0.9)
+            assert len(kept.reviews) == 1
+        finally:
+            session.close()
+
+    def test_a_recent_decision_keeps_its_evidence(self, client) -> None:
+        repo, session = self._repo(client.engine)
+        try:
+            decision = repo.record_match(
+                "ravi", track_id=1, score=0.9, evidence_jpeg=self._encoded()
+            )
+            assert repo.purge_evidence(older_than_days=30) == 0
+            assert repo.decision_evidence(decision.id) is not None
+        finally:
+            session.close()

@@ -358,6 +358,20 @@ Everything you confirm or reject is recorded against that account, and the
 server takes the identity from your session rather than from the request — a
 review cannot claim to be someone else's.
 
+**Review shows you the person.** A candidate match displays the crop it was
+made on beside the enrolment reference, so the decision is a comparison of two
+pictures rather than a judgement about a number. That matters more than it
+sounds: the human confirmation is the safeguard this whole architecture rests
+on, and a reviewer who cannot see the person can judge *how* the system reached
+its conclusion but not *whether* it is right. Where no image was captured the
+card says so and tells you to reject — an absent safeguard has to be visible.
+
+Those crops are personal data. They are encrypted like the templates, served
+only to a signed-in operator, and `WatchlistRepository.purge_evidence(days)`
+drops them from old decisions without touching the decisions, their scores or
+their reviews. How long to keep them is a policy call for whoever runs the
+deployment, so nothing calls it automatically.
+
 **Enrol someone** — upload photos or video, or record straight from the webcam.
 "Check what this covers" runs detection only and takes seconds; it tells you
 which of the three signals your files can actually support before you commit.

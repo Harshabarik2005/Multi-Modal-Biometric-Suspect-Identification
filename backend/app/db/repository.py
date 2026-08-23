@@ -83,6 +83,8 @@ def create_schema(engine: Engine) -> None:
 _ADDED_COLUMNS = {
     "templates": {"model_id": "VARCHAR(64) DEFAULT ''"},
     "decision_reviews": {"overturns_previous": "BOOLEAN DEFAULT 0"},
+    "match_decisions": {"evidence_jpeg": "BLOB"},
+    "people": {"reference_jpeg": "BLOB"},
 }
 
 
@@ -132,6 +134,34 @@ class WatchlistRepository:
             return raw, False
         return _ENCRYPTED_MAGIC + fernet.encrypt(raw), True
 
+    def _encode_bytes(self, raw: bytes | None) -> bytes | None:
+        """Encrypt an evidence image (DES-02).
+
+        A crop of an identified person is personal data in the same sense a
+        template is, so it goes through the same Fernet path rather than
+        sitting in the clear in a table right next to the encrypted vectors.
+        """
+        if raw is None:
+            return None
+        fernet = self.crypto._fernet()
+        if fernet is None:
+            refuse_plaintext("a review image")
+            return raw
+        return _ENCRYPTED_MAGIC + fernet.encrypt(raw)
+
+    def _decode_bytes(self, payload: bytes | None) -> bytes | None:
+        if payload is None:
+            return None
+        if not payload.startswith(_ENCRYPTED_MAGIC):
+            return payload  # written before evidence was encrypted
+        fernet = self.crypto._fernet()
+        if fernet is None:
+            raise RuntimeError(
+                "This review image is encrypted but no key is configured. Set "
+                f"{TEMPLATE_KEY_ENV} to the key used when it was recorded."
+            )
+        return fernet.decrypt(payload[len(_ENCRYPTED_MAGIC) :])
+
     def _decode(self, payload: bytes) -> np.ndarray:
         if payload.startswith(_ENCRYPTED_MAGIC):
             fernet = self.crypto._fernet()
@@ -154,8 +184,14 @@ class WatchlistRepository:
         source: str = "",
         actor: str = "system",
         replace: bool = False,
+        reference_jpeg: bytes | None = None,
     ) -> Person:
-        """Add or replace a watchlist entry. Writes an audit event either way."""
+        """Add or replace a watchlist entry. Writes an audit event either way.
+
+        `reference_jpeg` is one representative crop from the enrolment
+        footage, shown beside a candidate match so the reviewer is comparing
+        two pictures rather than trusting a number (DES-02).
+        """
         usable = {m: e for m, e in embeddings.items() if e.has_signal}
         if not usable:
             raise ValueError(
@@ -178,12 +214,15 @@ class WatchlistRepository:
             person.notes = notes
             person.source = source
             person.retired_at = None
+            if reference_jpeg is not None:
+                person.reference_jpeg = self._encode_bytes(reference_jpeg)
         else:
             person = Person(
                 person_id=person_id,
                 display_name=display_name,
                 notes=notes,
                 source=source,
+                reference_jpeg=self._encode_bytes(reference_jpeg),
             )
             self.session.add(person)
             self.session.flush()
@@ -302,8 +341,14 @@ class WatchlistRepository:
         calibrated: dict[Modality, float] | None = None,
         camera_id: str = "",
         frame_index: int = 0,
+        evidence_jpeg: bytes | None = None,
     ) -> MatchDecision:
-        """Record a candidate match. Always PENDING -- never auto-confirmed."""
+        """Record a candidate match. Always PENDING -- never auto-confirmed.
+
+        `evidence_jpeg` is the crop the match was made on. Without it a
+        reviewer is asked to confirm an identification of someone they have
+        never seen (DES-02).
+        """
         person = self.get_person(person_id)
         if person is None:
             raise ValueError(f"Unknown person {person_id!r}")
@@ -321,6 +366,7 @@ class WatchlistRepository:
             calibrated_json=json.dumps(
                 {m.value: round(c, 4) for m, c in (calibrated or {}).items()}
             ),
+            evidence_jpeg=self._encode_bytes(evidence_jpeg),
             status=DecisionStatus.PENDING,
         )
         self.session.add(decision)
@@ -448,6 +494,54 @@ class WatchlistRepository:
                 select(AuditEvent).order_by(AuditEvent.created_at.desc()).limit(limit)
             )
         )
+
+    def decision_evidence(self, decision_id: int) -> bytes | None:
+        """The crop a decision was made on, decrypted. None if there is none."""
+        decision = self.session.get(MatchDecision, decision_id)
+        if decision is None:
+            return None
+        return self._decode_bytes(decision.evidence_jpeg)
+
+    def person_reference(self, person_id: str) -> bytes | None:
+        """The enrolment crop for a person, decrypted. None if there is none."""
+        person = self.get_person(person_id)
+        if person is None:
+            return None
+        return self._decode_bytes(person.reference_jpeg)
+
+    def purge_evidence(self, older_than_days: float) -> int:
+        """Delete review images from decisions older than `older_than_days`.
+
+        The images exist so a human can judge a match. Once a decision is old
+        enough that nobody is going to revisit it, keeping a picture of the
+        person serves nothing and is one more thing to protect. The decision,
+        its score, its weights and its reviews all survive -- the audit trail
+        stays complete, it just stops carrying photographs indefinitely.
+
+        Not called automatically: how long to keep evidence is a policy
+        decision for whoever runs the deployment, not a default this code
+        should pick for them.
+        """
+        from datetime import timedelta
+
+        cutoff = datetime.now(timezone.utc) - timedelta(days=older_than_days)
+        purged = 0
+        for decision in self.session.scalars(
+            select(MatchDecision).where(
+                MatchDecision.created_at < cutoff,
+                MatchDecision.evidence_jpeg.is_not(None),
+            )
+        ):
+            decision.evidence_jpeg = None
+            purged += 1
+        if purged:
+            self.log(
+                "purge_evidence",
+                actor="system",
+                detail={"decisions": purged, "older_than_days": older_than_days},
+            )
+        self.session.commit()
+        return purged
 
     def events_of_kind(self, kind: str) -> list[AuditEvent]:
         """Every event of one kind, oldest first and deliberately unlimited.

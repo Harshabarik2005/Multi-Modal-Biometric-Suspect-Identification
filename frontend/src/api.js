@@ -160,6 +160,34 @@ export const api = {
     }),
 
   job: (jobId) => request(`/jobs/${jobId}`),
+
+  /**
+   * The crop a match was made on, and the enrolment crop to compare it with
+   * (DES-02).
+   *
+   * Fetched rather than pointed at with an <img src>, because these routes
+   * need the bearer token and an img tag cannot send a header. Returns an
+   * object URL the caller must revoke, or null when no image was stored --
+   * which is not an error, and the reviewer needs to be told about it.
+   */
+  evidenceImage: (decisionId) => imageUrl(`/decisions/${decisionId}/evidence`),
+  referenceImage: (personId) =>
+    imageUrl(`/watchlist/${encodeURIComponent(personId)}/reference`),
+}
+
+async function imageUrl(path) {
+  const response = await fetch(`/api${path}`, { headers: authHeaders() })
+
+  if (response.status === 401) {
+    clearToken()
+    onUnauthorized?.()
+    throw httpError('Your session has ended. Sign in again.', 401)
+  }
+  if (response.status === 404) return null
+  if (!response.ok) {
+    throw httpError(`${response.status} ${response.statusText}`, response.status)
+  }
+  return URL.createObjectURL(await response.blob())
 }
 
 /** POST multipart form data. Cannot use `request`, which sets a JSON header. */

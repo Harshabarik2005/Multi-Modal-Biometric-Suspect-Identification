@@ -24,7 +24,7 @@ from __future__ import annotations
 import json
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -119,6 +119,12 @@ class DecisionOut(BaseModel):
     reviews: list["ReviewOut"] = Field(default_factory=list)
     #: True only when a human has confirmed. Nothing may act otherwise.
     is_actionable: bool = False
+    #: Whether there is a crop to look at, and whether the person has an
+    #: enrolment crop to compare it with (DES-02). Flags rather than the
+    #: images: the bytes are fetched from their own routes so a listing of a
+    #: hundred decisions does not carry a hundred JPEGs.
+    has_evidence: bool = False
+    has_reference: bool = False
 
     @classmethod
     def of(cls, decision: MatchDecision) -> "DecisionOut":
@@ -137,6 +143,8 @@ class DecisionOut(BaseModel):
             created_at=decision.created_at.isoformat(),
             reviews=[ReviewOut.of(r) for r in decision.reviews],
             is_actionable=decision.is_actionable,
+            has_evidence=decision.evidence_jpeg is not None,
+            has_reference=decision.person.reference_jpeg is not None,
         )
 
 
@@ -328,6 +336,46 @@ def get_decision(decision_id: int, repo: Repo, operator: CurrentOperator) -> Dec
     if decision is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No such decision")
     return DecisionOut.of(decision)
+
+
+#: Images are personal data and must not sit in a shared cache. They are also
+#: not worth re-fetching constantly, so a short private cache is the balance.
+_IMAGE_HEADERS = {"Cache-Control": "private, max-age=300", "X-Content-Type-Options": "nosniff"}
+
+
+@router.get("/decisions/{decision_id}/evidence", tags=["decisions"])
+def decision_evidence(
+    decision_id: int, repo: Repo, operator: CurrentOperator
+) -> Response:
+    """The crop this match was made on (DES-02).
+
+    The review card used to show a score, some weight bars and a caution line
+    and no image at all, so the human whose confirmation the entire design
+    rests on could see how the system reached its conclusion but had no way to
+    judge whether it was right.
+    """
+    image = repo.decision_evidence(decision_id)
+    if image is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            "No image was stored for this decision. It predates evidence "
+            "capture, or the frame could not be encoded.",
+        )
+    return Response(content=image, media_type="image/jpeg", headers=_IMAGE_HEADERS)
+
+
+@router.get("/watchlist/{person_id}/reference", tags=["watchlist"])
+def person_reference(
+    person_id: str, repo: Repo, operator: CurrentOperator
+) -> Response:
+    """The enrolment crop, for side-by-side comparison with a match."""
+    image = repo.person_reference(person_id)
+    if image is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            "No enrolment image was stored for this person.",
+        )
+    return Response(content=image, media_type="image/jpeg", headers=_IMAGE_HEADERS)
 
 
 @router.post(

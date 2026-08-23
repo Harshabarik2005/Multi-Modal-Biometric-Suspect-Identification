@@ -15,6 +15,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from app.core.config import Settings
+from app.core.evidence import encode_crop
 from app.core.logging import get_logger
 from app.core.track_buffer import TrackBufferStore
 from app.core.types import Modality
@@ -159,6 +160,12 @@ def scan_video(
                 # (DES-01). Without this the reviewer sees a face-only match
                 # and has no way to know appearance was dropped rather than
                 # simply absent.
+                # The crop this match was made on. A reviewer confirming an
+                # identification needs to see the person, not just the score
+                # (DES-02). Captured here because this is the frame the match
+                # was actually scored on; by the time the findings are written
+                # the frame is long gone.
+                "evidence_jpeg": encode_crop(track.crop(frame)),
                 "not_compared": {
                     m.value: score.incomparable_reason
                     for m, score in best.scores.items()
@@ -185,9 +192,14 @@ def scan_video(
                 calibrated={M(k): v for k, v in finding["calibrated"].items()},
                 camera_id=camera_id,
                 frame_index=finding["frame_index"],
+                evidence_jpeg=finding.get("evidence_jpeg"),
             )
             finding["decision_id"] = decision.id
             finding["status"] = "pending"
+        # Stored, not returned. The image is fetched from its own authenticated
+        # route when a reviewer opens the decision, so it is not embedded in
+        # every scan response and every job record that holds one.
+        finding.pop("evidence_jpeg", None)
         findings.append(finding)
 
     logger.info(
