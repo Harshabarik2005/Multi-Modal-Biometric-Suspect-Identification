@@ -852,3 +852,45 @@ class TestThePreviewDoesNotBlockTheServer:
             "request on the server"
         )
         assert "await run_in_threadpool(\n            observations_from_uploads" in preview
+
+
+class TestImportingTheAppBuildsNothing:
+    """`app = create_app()` at module scope ran on every import.
+
+    It opened -- and created, if absent -- the default database whatever
+    database the caller was about to use, and started a job-runner thread pool
+    nothing used. `create_app` also sets the module-level session maker that
+    background jobs open sessions from, and the last call wins, so an import
+    ordering where the default app ran last would have left enrolment and scan
+    jobs writing to a different database than the request handlers read from.
+    """
+
+    def test_import_does_not_open_a_database(self, monkeypatch, tmp_path) -> None:
+        import importlib
+        import sys
+
+        # Point the default database somewhere that does not exist yet. If the
+        # import builds an app, the file appears.
+        database = tmp_path / "should-not-be-created.db"
+        monkeypatch.setenv("FRS_DATABASE_URL", f"sqlite:///{database}")
+
+        sys.modules.pop("app.api.main", None)
+        importlib.import_module("app.api.main")
+
+        assert not database.exists(), (
+            "importing the module built an app and created a database"
+        )
+
+    def test_the_default_app_is_still_reachable(self) -> None:
+        """`uvicorn app.api.main:app` has to keep working."""
+        from fastapi import FastAPI
+
+        import app.api.main as main
+
+        assert isinstance(main.app, FastAPI)
+
+    def test_an_unknown_attribute_still_raises(self) -> None:
+        import app.api.main as main
+
+        with pytest.raises(AttributeError):
+            main.does_not_exist

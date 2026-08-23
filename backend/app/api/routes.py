@@ -73,6 +73,9 @@ class PersonOut(BaseModel):
     retired_at: str | None = None
     is_active: bool = True
     templates: list[TemplateOut] = Field(default_factory=list)
+    #: Whether there is an enrolment photo to show. A flag, not the bytes:
+    #: a watchlist of two hundred people is not two hundred inline JPEGs.
+    has_reference: bool = False
 
     @classmethod
     def of(cls, person: Person) -> "PersonOut":
@@ -84,6 +87,7 @@ class PersonOut(BaseModel):
             enrolled_at=person.enrolled_at.isoformat() if person.enrolled_at else None,
             retired_at=person.retired_at.isoformat() if person.retired_at else None,
             is_active=person.is_active,
+            has_reference=person.reference_jpeg is not None,
             templates=[
                 TemplateOut(
                     modality=t.modality,

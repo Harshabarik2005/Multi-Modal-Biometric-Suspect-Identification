@@ -289,11 +289,19 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-/** Display metadata per modality. Colours are reused by the weight bars. */
+/**
+ * Display metadata per modality. The tones are reused by the weight bars.
+ *
+ * Greys, not hues. Colour in an identification interface does work nobody
+ * asked it to do -- a green bar reads as approval before the reviewer has
+ * looked at anything. These are ordered by how much evidence the modality
+ * actually carries: face darkest, appearance lightest, so a bar dominated by
+ * pale segments looks as thin as it is.
+ */
 export const MODALITIES = {
-  face: { label: 'Face', colour: '#3b82f6', blurb: 'ArcFace identity' },
-  gait: { label: 'Gait', colour: '#a855f7', blurb: 'How they walk' },
-  reid: { label: 'Re-ID', colour: '#f59e0b', blurb: 'Build and clothing' },
+  face: { label: 'Face', tone: '#1a1a1a', blurb: 'ArcFace identity' },
+  gait: { label: 'Gait', tone: '#6b6b6b', blurb: 'How they walk' },
+  reid: { label: 'Appearance', tone: '#b8b8b8', blurb: 'Build and clothing' },
 }
 
 /**

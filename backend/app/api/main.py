@@ -127,4 +127,25 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None) -
     return app
 
 
-app = create_app()
+def __getattr__(name: str):
+    """Build the default app only if somebody actually asks for it.
+
+    `app = create_app()` used to run at import time. That opened -- and
+    created, if absent -- the default database on every import, whatever
+    database the caller was about to use: `serve.py --db-url ...` built its own
+    app immediately afterwards, but the default one had already touched the
+    file on disk and started a second job-runner thread pool that nothing ever
+    used.
+
+    Worse, `create_app` sets the module-level `session_maker_for_app` that
+    background jobs open their sessions from, and the last call wins. With two
+    apps in one process, an import ordering where the default one ran last
+    would have left enrolment and scan jobs writing to a different database
+    than the request handlers were reading from -- with nothing failing.
+
+    Module `__getattr__` keeps `uvicorn app.api.main:app` working while
+    building nothing for callers that construct their own.
+    """
+    if name == "app":
+        return create_app()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

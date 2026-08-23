@@ -1,89 +1,90 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
   api,
-  clearToken,
-  setUnauthorizedHandler,
-  MODALITIES,
   appearanceShare,
+  clearToken,
+  MODALITIES,
+  setUnauthorizedHandler,
 } from './api'
-import Enroll from './Enroll'
+import Identify from './Identify'
 import Login from './Login'
-import Scan from './Scan'
+import PersonShot from './PersonShot'
+import Records from './Records'
+import Register from './Register'
 
 /* ------------------------------------------------------------------ *
- * Explainability
+ * Shared explainability pieces
  * ------------------------------------------------------------------ */
 
 /**
- * The per-modality breakdown behind a match.
+ * What the system relied on, and how much.
  *
- * This is the screen the build plan's section 8 is really about. A reviewer
- * must be able to see *why* the system fired before confirming it, because a
- * match resting on a clear face and one resting on a jacket are very different
- * grounds for acting on an identification -- and they look identical if you
- * only show the final score.
+ * Segments run widest-first, and each signal's grey is fixed by how much
+ * evidence that signal carries — face near-black, appearance near-white. A
+ * decision resting mostly on clothing therefore *looks* washed out, where a
+ * coloured chart would have let it look as vivid as a face match.
  */
 function WeightBreakdown({ weights = {}, calibrated = {}, strategy }) {
-  const entries = Object.entries(weights).filter(([, w]) => w > 0)
+  const entries = Object.entries(weights).filter(([, weight]) => weight > 0)
   if (entries.length === 0) {
-    return <p className="muted">No per-modality breakdown was recorded.</p>
+    return <p className="muted small">No per-signal breakdown was recorded.</p>
   }
 
-  const total = entries.reduce((sum, [, w]) => sum + w, 0)
+  const total = entries.reduce((sum, [, weight]) => sum + weight, 0)
+  const ordered = [...entries].sort((a, b) => b[1] - a[1])
 
   return (
     <div className="breakdown">
-      <div className="breakdown-bar" role="img" aria-label="Modality contribution">
-        {entries.map(([modality, weight]) => {
+      <div className="breakdown-bar" role="img" aria-label="Signal contribution">
+        {ordered.map(([modality, weight]) => {
           const meta = MODALITIES[modality] || {}
-          const pct = (weight / total) * 100
+          const share = (weight / total) * 100
           return (
             <div
               key={modality}
               className="breakdown-segment"
-              style={{ width: `${pct}%`, background: meta.colour || '#64748b' }}
-              title={`${meta.label || modality}: ${pct.toFixed(0)}% of the decision`}
+              style={{ width: `${share}%`, background: meta.tone || '#999' }}
+              title={`${meta.label || modality}: ${share.toFixed(0)}% of this decision`}
             />
           )
         })}
       </div>
 
-      <table className="breakdown-table">
+      <table className="table">
         <thead>
           <tr>
-            <th>Modality</th>
+            <th>Signal</th>
             <th>Weight</th>
             <th>Score</th>
             <th>What it measures</th>
           </tr>
         </thead>
         <tbody>
-          {entries
-            .sort((a, b) => b[1] - a[1])
-            .map(([modality, weight]) => {
-              const meta = MODALITIES[modality] || {}
-              return (
-                <tr key={modality}>
-                  <td>
-                    <span
-                      className="swatch"
-                      style={{ background: meta.colour || '#64748b' }}
-                    />
-                    {meta.label || modality}
-                  </td>
-                  <td className="mono">{((weight / total) * 100).toFixed(0)}%</td>
-                  <td className="mono">
-                    {calibrated[modality] !== undefined
-                      ? calibrated[modality].toFixed(2)
-                      : '—'}
-                  </td>
-                  <td className="muted">{meta.blurb || ''}</td>
-                </tr>
-              )
-            })}
+          {ordered.map(([modality, weight]) => {
+            const meta = MODALITIES[modality] || {}
+            return (
+              <tr key={modality}>
+                <td style={{ whiteSpace: 'nowrap' }}>
+                  <span className="swatch" style={{ background: meta.tone }} />
+                  {meta.label || modality}
+                </td>
+                <td className="num">{((weight / total) * 100).toFixed(0)}%</td>
+                <td className="num">
+                  {calibrated[modality] !== undefined
+                    ? calibrated[modality].toFixed(2)
+                    : '—'}
+                </td>
+                <td className="muted small">{meta.blurb || ''}</td>
+              </tr>
+            )
+          })}
         </tbody>
       </table>
-      {strategy && <p className="muted small">Fusion strategy: {strategy}</p>}
+      {strategy && (
+        <p className="muted small" style={{ marginTop: 8 }}>
+          Fusion rule: <span className="mono">{strategy}</span>
+        </p>
+      )}
     </div>
   )
 }
@@ -91,19 +92,20 @@ function WeightBreakdown({ weights = {}, calibrated = {}, strategy }) {
 /**
  * Warns when a match rests mostly on appearance.
  *
- * Not decoration. Re-ID encodes clothing more than the person, so a
- * confirmation on that basis deserves more scepticism than the raw score
- * suggests.
+ * Not decoration. Appearance encodes clothing more than the person, so a
+ * confirmation on that basis deserves more scepticism than the score suggests.
  */
-function EvidenceCaution({ weights }) {
+function AppearanceCaution({ weights }) {
   const share = appearanceShare(weights)
   if (share < 0.5) return null
   return (
     <p className="caution">
-      <strong>{(share * 100).toFixed(0)}% of this match rests on appearance
-      (build and clothing).</strong>{' '}
-      Appearance is the weakest of the three signals and goes stale as people
-      change clothes. Treat this as a weaker identification than the score alone
+      <strong>
+        {(share * 100).toFixed(0)}% of this rests on appearance — build and
+        clothing.
+      </strong>{' '}
+      That is the weakest of the three signals and it goes stale as people
+      change clothes. Treat it as a weaker identification than the score alone
       suggests.
     </p>
   )
@@ -112,81 +114,6 @@ function EvidenceCaution({ weights }) {
 /* ------------------------------------------------------------------ *
  * Review queue
  * ------------------------------------------------------------------ */
-
-/**
- * The two pictures a reviewer needs: who was seen, and who they are supposed
- * to be (DES-02).
- *
- * Before this, the review card showed a score, some weight bars and a caution
- * line. The human confirmation is the safeguard the whole architecture is
- * built around, and the human could see *how* the system reached its
- * conclusion but had no way to judge *whether* it was right. Confirming an
- * identification of someone you have never seen is not a check.
- *
- * When an image is missing that is stated rather than hidden. A reviewer being
- * asked to decide without evidence needs to know that is what is happening.
- */
-function EvidencePair({ decision, onError }) {
-  const [images, setImages] = useState(null)
-
-  useEffect(() => {
-    let cancelled = false
-    let urls = []
-
-    Promise.all([
-      decision.has_evidence ? api.evidenceImage(decision.id) : null,
-      decision.has_reference ? api.referenceImage(decision.person_id) : null,
-    ])
-      .then(([seen, enrolled]) => {
-        if (cancelled) {
-          urls = [seen, enrolled].filter(Boolean)
-          return
-        }
-        urls = [seen, enrolled].filter(Boolean)
-        setImages({ seen, enrolled })
-      })
-      .catch((error) => {
-        if (!cancelled) onError?.(error.message)
-      })
-
-    return () => {
-      cancelled = true
-      urls.forEach((url) => URL.revokeObjectURL(url))
-    }
-  }, [decision.id, decision.person_id, decision.has_evidence, decision.has_reference])
-
-  return (
-    <div className="evidence">
-      <figure className="evidence-pane">
-        <figcaption className="muted small">Seen on camera</figcaption>
-        {images?.seen ? (
-          <img src={images.seen} alt="The person detected in the footage" />
-        ) : (
-          <div className="evidence-missing">
-            {decision.has_evidence
-              ? 'Loading…'
-              : 'No image was captured for this match.'}
-          </div>
-        )}
-      </figure>
-
-      <figure className="evidence-pane">
-        <figcaption className="muted small">
-          Enrolled as {decision.display_name}
-        </figcaption>
-        {images?.enrolled ? (
-          <img src={images.enrolled} alt={`Enrolment reference for ${decision.display_name}`} />
-        ) : (
-          <div className="evidence-missing">
-            {decision.has_reference
-              ? 'Loading…'
-              : 'No enrolment image was stored.'}
-          </div>
-        )}
-      </figure>
-    </div>
-  )
-}
 
 function DecisionCard({ decision, onReviewed, onError }) {
   const [reason, setReason] = useState('')
@@ -212,18 +139,44 @@ function DecisionCard({ decision, onReviewed, onError }) {
         <div>
           <h3>{decision.display_name}</h3>
           <p className="muted small">
-            {decision.person_id} · track {decision.track_id}
+            <span className="mono">{decision.person_id}</span> · track{' '}
+            <span className="num">{decision.track_id}</span>
             {decision.camera_id && ` · ${decision.camera_id}`} · frame{' '}
-            {decision.frame_index}
+            <span className="num">{decision.frame_index}</span>
           </p>
         </div>
         <div className="score">
           <span className="score-value">{decision.score.toFixed(3)}</span>
-          <span className="muted small">fused score</span>
+          <span className="score-label">score</span>
         </div>
       </header>
 
-      <EvidencePair decision={decision} onError={onError} />
+      <div className="evidence">
+        <figure className="evidence-pane">
+          <figcaption>Seen on camera</figcaption>
+          <PersonShot
+            key={`seen-${decision.id}`}
+            alt="The person detected in the footage"
+            missing="No image was captured for this sighting."
+            fetcher={
+              decision.has_evidence ? () => api.evidenceImage(decision.id) : null
+            }
+          />
+        </figure>
+        <figure className="evidence-pane">
+          <figcaption>Registered as {decision.display_name}</figcaption>
+          <PersonShot
+            key={`ref-${decision.person_id}`}
+            alt={`Registration photo for ${decision.display_name}`}
+            missing="No registration photo stored."
+            fetcher={
+              decision.has_reference
+                ? () => api.referenceImage(decision.person_id)
+                : null
+            }
+          />
+        </figure>
+      </div>
 
       {!decision.has_evidence && (
         <p className="caution">
@@ -237,36 +190,42 @@ function DecisionCard({ decision, onReviewed, onError }) {
         calibrated={decision.calibrated}
         strategy={decision.strategy}
       />
-      <EvidenceCaution weights={decision.weights} />
+      <AppearanceCaution weights={decision.weights} />
 
-      <div className="review">
+      <label className="stacked" style={{ marginTop: 14 }}>
+        <span>
+          Note <span className="hint">— optional, but it is what the record shows later</span>
+        </span>
         <input
           type="text"
-          placeholder="Note (optional) — why you decided this"
+          placeholder="Why you decided this"
           value={reason}
           onChange={(event) => setReason(event.target.value)}
           disabled={busy}
         />
-        <div className="review-actions">
-          <button
-            className="btn btn-reject"
-            onClick={() => submit('rejected')}
-            disabled={busy}
-          >
-            Not a match
-          </button>
-          <button
-            className="btn btn-confirm"
-            onClick={() => submit('confirmed')}
-            disabled={busy}
-          >
-            Confirm identification
-          </button>
-        </div>
+      </label>
+
+      <div className="actions actions-end" style={{ marginTop: 12 }}>
+        <button
+          className="btn btn-quiet"
+          onClick={() => submit('rejected')}
+          disabled={busy}
+        >
+          Not this person
+        </button>
+        <button
+          className="btn btn-primary"
+          onClick={() => submit('confirmed')}
+          disabled={busy}
+        >
+          Confirm identification
+        </button>
       </div>
-      <p className="muted small">
+
+      <p className="muted small" style={{ marginTop: 12 }}>
         Raised {new Date(decision.created_at).toLocaleString()}. Nothing has
-        happened yet — confirming is what makes this actionable.
+        happened yet — confirming is what makes this actionable, and it is
+        recorded against your account.
       </p>
     </article>
   )
@@ -293,201 +252,151 @@ function ReviewQueue({ onError }) {
     return () => clearInterval(timer)
   }, [load])
 
-  if (loading && decisions.length === 0) return <p className="muted">Loading…</p>
-  if (decisions.length === 0) {
-    return (
-      <div className="empty">
-        <h3>Nothing awaiting review</h3>
-        <p className="muted">
-          Candidate matches appear here when the matcher runs with{' '}
-          <code>--record</code>. They stay pending until someone reviews them.
-        </p>
-      </div>
-    )
+  if (loading && decisions.length === 0) {
+    return <p className="muted small">Loading…</p>
   }
 
   return (
-    <>
-      <p className="muted">
-        {decisions.length} candidate{decisions.length === 1 ? '' : 's'} awaiting
-        review. None of them has triggered anything.
-      </p>
-      {decisions.map((decision) => (
-        <DecisionCard
-          key={decision.id}
-          decision={decision}
-          onReviewed={load}
-          onError={onError}
-        />
-      ))}
-    </>
+    <div className="division">
+      <div className="division-head">
+        <h2>Review</h2>
+        <p>
+          {decisions.length === 0
+            ? 'Nothing is waiting. Candidates appear here after a search.'
+            : `${decisions.length} candidate${decisions.length === 1 ? '' : 's'} awaiting a
+               decision. None of them has triggered anything, and none will until
+               you say so.`}
+        </p>
+      </div>
+
+      {decisions.length === 0 ? (
+        <div className="empty">
+          <h3>Nothing awaiting review</h3>
+          <p>
+            Search some footage under Identify and any candidates will queue up
+            here. They stay pending until a person decides.
+          </p>
+        </div>
+      ) : (
+        decisions.map((decision) => (
+          <DecisionCard
+            key={decision.id}
+            decision={decision}
+            onReviewed={load}
+            onError={onError}
+          />
+        ))
+      )}
+    </div>
   )
 }
 
 /* ------------------------------------------------------------------ *
- * Watchlist, alerts, audit
+ * Activity: confirmed identifications and the audit trail
  * ------------------------------------------------------------------ */
 
-function Watchlist({ onError }) {
-  const [people, setPeople] = useState([])
-
-  useEffect(() => {
-    api.watchlist().then(setPeople).catch((e) => onError(e.message))
-  }, [onError])
-
-  if (people.length === 0) {
-    return (
-      <div className="empty">
-        <h3>Nobody is enrolled</h3>
-        <p className="muted">
-          Enroll with <code>scripts/enroll.py</code>, then import with{' '}
-          <code>scripts/serve.py --import-enrollments</code>.
-        </p>
-      </div>
-    )
-  }
-
-  return (
-    <table className="table">
-      <thead>
-        <tr>
-          <th>ID</th>
-          <th>Name</th>
-          <th>Stored signals</th>
-          <th>Enrolled</th>
-        </tr>
-      </thead>
-      <tbody>
-        {people.map((person) => (
-          <tr key={person.person_id}>
-            <td className="mono">{person.person_id}</td>
-            <td>{person.display_name}</td>
-            <td>
-              {person.templates.map((template) => {
-                const meta = MODALITIES[template.modality] || {}
-                return (
-                  <span
-                    key={template.modality}
-                    className="pill"
-                    style={{ borderColor: meta.colour }}
-                    title={
-                      template.encrypted
-                        ? 'Encrypted at rest'
-                        : 'NOT ENCRYPTED — set FRS_TEMPLATE_ENCRYPTION_KEY'
-                    }
-                  >
-                    {meta.label || template.modality}
-                    {!template.encrypted && ' ⚠'}
-                  </span>
-                )
-              })}
-            </td>
-            <td className="muted small">
-              {person.enrolled_at
-                ? new Date(person.enrolled_at).toLocaleDateString()
-                : '—'}
-            </td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
-  )
-}
-
-function Alerts({ onError }) {
+function Activity({ onError }) {
   const [alerts, setAlerts] = useState([])
-
-  useEffect(() => {
-    api.alerts().then(setAlerts).catch((e) => onError(e.message))
-  }, [onError])
-
-  if (alerts.length === 0) {
-    return (
-      <div className="empty">
-        <h3>No confirmed identifications</h3>
-        <p className="muted">
-          Only human-confirmed matches appear here. A pending decision is
-          invisible to alerting by design.
-        </p>
-      </div>
-    )
-  }
-
-  return (
-    <>
-      {alerts.map((alert) => (
-        <article key={alert.id} className="card">
-          <header className="card-head">
-            <div>
-              <h3>{alert.display_name}</h3>
-              <p className="muted small">
-                {alert.person_id} · track {alert.track_id}
-                {alert.camera_id && ` · ${alert.camera_id}`}
-              </p>
-            </div>
-            <div className="score">
-              <span className="score-value">{alert.score.toFixed(3)}</span>
-              <span className="muted small">confirmed</span>
-            </div>
-          </header>
-          <WeightBreakdown
-            weights={alert.weights}
-            calibrated={alert.calibrated}
-            strategy={alert.strategy}
-          />
-          {alert.reviews.map((review, index) => (
-            <p key={index} className="muted small">
-              {review.verdict} by <strong>{review.operator}</strong> ·{' '}
-              {new Date(review.created_at).toLocaleString()}
-              {review.reason && ` — “${review.reason}”`}
-            </p>
-          ))}
-        </article>
-      ))}
-    </>
-  )
-}
-
-function Audit({ onError }) {
   const [events, setEvents] = useState([])
 
   useEffect(() => {
+    api.alerts().then(setAlerts).catch((e) => onError(e.message))
     api.audit().then(setEvents).catch((e) => onError(e.message))
   }, [onError])
 
-  if (events.length === 0) return <p className="muted">No audit events yet.</p>
-
   return (
-    <table className="table">
-      <thead>
-        <tr>
-          <th>When</th>
-          <th>Event</th>
-          <th>Actor</th>
-          <th>Subject</th>
-          <th>Detail</th>
-        </tr>
-      </thead>
-      <tbody>
-        {events.map((event, index) => (
-          <tr key={index}>
-            <td className="muted small">
-              {new Date(event.created_at).toLocaleString()}
-            </td>
-            <td>
-              <span className="pill">{event.kind}</span>
-            </td>
-            <td>{event.actor}</td>
-            <td className="mono">{event.subject || '—'}</td>
-            <td className="muted small mono">
-              {Object.keys(event.detail).length
-                ? JSON.stringify(event.detail)
-                : '—'}
-            </td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
+    <div className="division">
+      <div className="division-head">
+        <h2>Activity</h2>
+        <p>
+          Confirmed identifications, and the record of everything this system
+          has been asked to do. The trail is append-only — a change of mind adds
+          an entry rather than replacing one.
+        </p>
+      </div>
+
+      <div className="card-title-rule">Confirmed identifications</div>
+      {alerts.length === 0 ? (
+        <div className="empty">
+          <h3>None confirmed</h3>
+          <p>
+            Only human-confirmed matches appear here. A pending candidate is
+            invisible to alerting by design.
+          </p>
+        </div>
+      ) : (
+        alerts.map((alert) => (
+          <article key={alert.id} className="card">
+            <header className="card-head">
+              <div>
+                <h3>{alert.display_name}</h3>
+                <p className="muted small">
+                  <span className="mono">{alert.person_id}</span> · track{' '}
+                  <span className="num">{alert.track_id}</span>
+                  {alert.camera_id && ` · ${alert.camera_id}`}
+                </p>
+              </div>
+              <div className="score">
+                <span className="score-value">{alert.score.toFixed(3)}</span>
+                <span className="score-label">confirmed</span>
+              </div>
+            </header>
+            <WeightBreakdown
+              weights={alert.weights}
+              calibrated={alert.calibrated}
+              strategy={alert.strategy}
+            />
+            {alert.reviews.map((review, index) => (
+              <p key={index} className="muted small">
+                {review.verdict} by <strong>{review.operator}</strong> ·{' '}
+                {new Date(review.created_at).toLocaleString()}
+                {review.reason && ` — “${review.reason}”`}
+              </p>
+            ))}
+          </article>
+        ))
+      )}
+
+      <hr className="rule" />
+
+      <div className="card-title-rule">Audit trail</div>
+      {events.length === 0 ? (
+        <p className="muted small">No events yet.</p>
+      ) : (
+        <div className="card">
+          <table className="table">
+            <thead>
+              <tr>
+                <th>When</th>
+                <th>Event</th>
+                <th>Who</th>
+                <th>Subject</th>
+                <th>Detail</th>
+              </tr>
+            </thead>
+            <tbody>
+              {events.map((event, index) => (
+                <tr key={index}>
+                  <td className="muted small" style={{ whiteSpace: 'nowrap' }}>
+                    {new Date(event.created_at).toLocaleString()}
+                  </td>
+                  <td>
+                    <span className="pill">{event.kind}</span>
+                  </td>
+                  <td className="small">{event.actor}</td>
+                  <td className="mono small">{event.subject || '—'}</td>
+                  <td className="muted small mono">
+                    {Object.keys(event.detail).length
+                      ? JSON.stringify(event.detail)
+                      : '—'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -496,21 +405,20 @@ function Audit({ onError }) {
  * ------------------------------------------------------------------ */
 
 const TABS = [
-  { id: 'enroll', label: 'Enrol someone' },
-  { id: 'scan', label: 'Search footage' },
-  { id: 'review', label: 'Review queue' },
-  { id: 'watchlist', label: 'Watchlist' },
-  { id: 'alerts', label: 'Confirmed' },
-  { id: 'audit', label: 'Audit trail' },
+  { id: 'register', label: 'Register' },
+  { id: 'records', label: 'Records' },
+  { id: 'identify', label: 'Identify' },
+  { id: 'review', label: 'Review' },
+  { id: 'activity', label: 'Activity' },
 ]
 
 export default function App() {
   const [session, setSession] = useState(null)
-  const [tab, setTab] = useState('enroll')
+  const [tab, setTab] = useState('register')
   const [error, setError] = useState(null)
   const [stats, setStats] = useState(null)
-  // Bumped to force the watchlist and queue to refetch after an enrolment or
-  // scan, so the tabs are never stale.
+  // Bumped to force the records and queue to refetch after a registration or
+  // a search, so no tab shows a stale list.
   const [version, setVersion] = useState(0)
 
   const onError = useCallback((message) => setError(message), [])
@@ -527,10 +435,7 @@ export default function App() {
 
   useEffect(() => {
     if (!session) return
-    api
-      .stats()
-      .then(setStats)
-      .catch(() => setStats(null))
+    api.stats().then(setStats).catch(() => setStats(null))
   }, [session, version, tab])
 
   if (!session) {
@@ -554,48 +459,26 @@ export default function App() {
     setError(null)
   }
 
+  const bump = () => setVersion((value) => value + 1)
+
   return (
     <div className="app">
       <header className="masthead">
-        <div>
+        <div className="wordmark">
           <h1>Faceless FRS</h1>
-          <p className="muted small">
-            Multi-modal identification — face, gait and appearance
-          </p>
+          <span className="tagline">Face · Gait · Appearance</span>
         </div>
         <div className="session">
-          <span className="muted small">
-            Signed in as <strong>{session.display_name || session.username}</strong>
+          <span className="session-who">
+            <strong>{session.display_name || session.username}</strong>
+            <br />
+            signed in
           </span>
-          <button className="btn btn-reject btn-small" onClick={signOut}>
+          <button className="btn btn-quiet btn-small" onClick={signOut}>
             Sign out
           </button>
         </div>
       </header>
-
-      <p className="notice">
-        This system does not act on its own. Every candidate is a suggestion for
-        a human to confirm or reject, the reasoning behind each one is shown so
-        it can be judged rather than trusted, and whatever you decide is
-        recorded against your account.
-      </p>
-
-      {stats?.warnings?.length > 0 && (
-        <div className="caution banner">
-          <strong>Scores on this deployment are not trustworthy yet.</strong>
-          <ul>
-            {stats.warnings.map((warning) => (
-              <li key={warning}>{warning}</li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      {error && (
-        <div className="error" onClick={() => setError(null)}>
-          {error} <span className="muted small">(click to dismiss)</span>
-        </div>
-      )}
 
       <nav className="tabs">
         {TABS.map((entry) => (
@@ -612,18 +495,37 @@ export default function App() {
         ))}
       </nav>
 
+      {stats?.warnings?.length > 0 && (
+        <div className="banner">
+          <strong>Scores on this deployment are not trustworthy yet.</strong>
+          <ul>
+            {stats.warnings.map((warning) => (
+              <li key={warning}>{warning}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {error && (
+        <div className="error" onClick={() => setError(null)}>
+          {error} <span className="muted">(click to dismiss)</span>
+        </div>
+      )}
+
       <main>
-        {tab === 'enroll' && (
-          <Enroll onError={onError} onEnrolled={() => setVersion((v) => v + 1)} />
-        )}
-        {tab === 'scan' && (
-          <Scan onError={onError} onScanned={() => setVersion((v) => v + 1)} />
-        )}
+        {tab === 'register' && <Register onError={onError} onRegistered={bump} />}
+        {tab === 'records' && <Records key={version} onError={onError} />}
+        {tab === 'identify' && <Identify onError={onError} onScanned={bump} />}
         {tab === 'review' && <ReviewQueue key={version} onError={onError} />}
-        {tab === 'watchlist' && <Watchlist key={version} onError={onError} />}
-        {tab === 'alerts' && <Alerts key={version} onError={onError} />}
-        {tab === 'audit' && <Audit key={version} onError={onError} />}
+        {tab === 'activity' && <Activity key={version} onError={onError} />}
       </main>
+
+      <p className="notice" style={{ marginTop: 40 }}>
+        This system does not act on its own. Every candidate is a suggestion for
+        a person to confirm or reject, the reasoning behind each one is shown so
+        it can be judged rather than trusted, and whatever you decide is
+        recorded against your account.
+      </p>
     </div>
   )
 }

@@ -68,3 +68,9 @@ frontend/.vite/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# --- Local tooling ----------------------------------------------------------
+# Dev-server launch config. Machine-specific absolute paths, and the env block
+# is where an encryption key or auth secret ends up while working locally --
+# neither belongs in the repository.
+.claude/launch.json
