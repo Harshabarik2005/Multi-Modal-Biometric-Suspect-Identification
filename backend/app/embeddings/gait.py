@@ -41,6 +41,7 @@ model expects, so swapping one in later is an encoder change and nothing else.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Sequence
 
 import cv2
@@ -74,6 +75,104 @@ def cadence_signal(silhouettes: Sequence[Silhouette]) -> np.ndarray:
         # Mean occupied width across the leg rows.
         values.append(float(legs.sum(axis=1).mean()))
     return np.asarray(values, dtype=np.float32)
+
+
+@dataclass(frozen=True)
+class CadenceSamples:
+    """A cadence signal placed on a uniform time grid (LOG-06).
+
+    Autocorrelation assumes evenly spaced samples. The silhouettes feeding it
+    are not evenly spaced: `video.frame_stride` skips source frames, and the
+    extractor drops any frame whose mask failed. Treating the survivors as
+    uniform makes the recovered period a function of how many masks happened to
+    work, which is not a property of the person's walk.
+    """
+
+    #: Signal resampled onto a uniform grid.
+    signal: np.ndarray
+    #: Grid spacing, in samples per second.
+    rate_hz: float
+    #: Fraction of grid points that had a real sample near them. Low means the
+    #: track is mostly interpolation, and a period recovered from invented
+    #: values is invented too.
+    coverage: float
+    #: How long the track spans, in seconds.
+    duration_s: float
+
+    def lag_bounds(self, min_seconds: float, max_seconds: float) -> tuple[int, int]:
+        """Autocorrelation lag bounds, in grid samples, for a period in seconds."""
+        return (
+            max(2, int(round(min_seconds * self.rate_hz))),
+            max(2, int(round(max_seconds * self.rate_hz))),
+        )
+
+    def resolves(self, min_seconds: float, min_samples: float) -> bool:
+        """Whether the shortest period of interest is sampled finely enough.
+
+        Deriving the lag bounds from the real sample rate stops gait silently
+        reporting nothing on a strided stream, but it does not conjure signal
+        that is not there. At five samples a second a half gait cycle spans
+        about two of them, and autocorrelation on two samples does not return
+        "unsure" -- it locks onto the full cycle and reports a confident number
+        that is twice the truth.
+
+        A wrong cadence is worse than no cadence: it feeds the GEI's
+        trustworthiness and the attention head weighs it as real evidence. So
+        the branch refuses below this rather than guessing.
+        """
+        return min_seconds * self.rate_hz >= min_samples
+
+
+def resample_cadence(
+    silhouettes: Sequence[Silhouette],
+    values: np.ndarray,
+    fallback_fps: float,
+) -> CadenceSamples:
+    """Put a cadence signal on a uniform time grid.
+
+    Falls back to assuming uniform sampling at `fallback_fps` when the
+    silhouettes carry no usable timestamps -- which is the case for anything
+    constructed by hand, and reproduces the behaviour this had before
+    timestamps existed.
+    """
+    times = np.asarray(
+        [s.timestamp_s for s in silhouettes], dtype=np.float64
+    )
+    usable = times.size == values.size and times.size >= 2 and np.all(times >= 0)
+    if usable:
+        usable = bool(np.all(np.diff(times) > 0)) and float(times[-1] - times[0]) > 0
+
+    if not usable:
+        rate = fallback_fps if fallback_fps > 0 else 25.0
+        return CadenceSamples(
+            signal=np.asarray(values, dtype=np.float32),
+            rate_hz=rate,
+            coverage=1.0,
+            duration_s=float(values.size / rate) if values.size else 0.0,
+        )
+
+    gaps = np.diff(times)
+    step = float(np.median(gaps))
+    if step <= 0:
+        step = float(times[-1] - times[0]) / max(1, times.size - 1)
+
+    duration = float(times[-1] - times[0])
+    count = max(2, int(round(duration / step)) + 1)
+    grid = np.linspace(times[0], times[-1], count)
+    resampled = np.interp(grid, times, values).astype(np.float32)
+
+    # A grid point is "real" when a sample sits within half a step of it.
+    # Anything else is interpolation across a gap, and a period recovered
+    # mostly from interpolation is a property of np.interp, not of a walk.
+    nearest = np.abs(grid[:, None] - times[None, :]).min(axis=1)
+    coverage = float(np.mean(nearest <= step / 2.0))
+
+    return CadenceSamples(
+        signal=resampled,
+        rate_hz=1.0 / step,
+        coverage=coverage,
+        duration_s=duration,
+    )
 
 
 def swing_ratio(signal: np.ndarray) -> float:
@@ -324,14 +423,45 @@ class GaitEmbedder(EmbeddingBranch):
                 self.modality, reason="too few usable silhouettes"
             )
 
-        signal = cadence_signal(silhouettes)
-        half_period, periodicity = estimate_half_period(
-            signal, self.cfg.min_half_period, self.cfg.max_half_period
+        # Cadence is a rate, so it is recovered in real time rather than in
+        # frames: the stride skips source frames and the extractor drops any
+        # whose mask failed, so the survivors are not evenly spaced (LOG-06).
+        cadence = resample_cadence(
+            silhouettes, cadence_signal(silhouettes), self.cfg.assumed_fps
         )
+        if cadence.coverage < self.cfg.min_cadence_coverage:
+            return ModalityEmbedding.empty(
+                self.modality,
+                reason="too many gaps in the silhouette sequence to read cadence",
+            )
+
+        if not cadence.resolves(
+            self.cfg.min_half_period_s, self.cfg.min_samples_per_half_period
+        ):
+            # Sampled too coarsely to tell a walk from its own harmonics.
+            logger.warning(
+                "Gait refused: %.1f samples/second cannot resolve a %.2fs half "
+                "cycle. Lower video.frame_stride, or accept that this footage "
+                "carries no gait.",
+                cadence.rate_hz,
+                self.cfg.min_half_period_s,
+            )
+            return ModalityEmbedding.empty(
+                self.modality,
+                reason="frames too far apart to measure cadence",
+            )
+
+        signal = cadence.signal
+        min_lag, max_lag = cadence.lag_bounds(
+            self.cfg.min_half_period_s, self.cfg.max_half_period_s
+        )
+        half_period, periodicity = estimate_half_period(signal, min_lag, max_lag)
         swing = swing_ratio(signal)
 
+        # In seconds, so this measures the walk rather than the sample count.
+        half_period_s = half_period / cadence.rate_hz if half_period else 0.0
         cycles = (
-            len(silhouettes) / (half_period * 2) if half_period else 0.0
+            cadence.duration_s / (half_period_s * 2) if half_period_s > 0 else 0.0
         )
         if half_period is None or cycles < 1.0:
             # Not one complete gait cycle: a GEI here would encode a pose, not
@@ -383,6 +513,11 @@ class GaitEmbedder(EmbeddingBranch):
             frames_used=len(silhouettes),
             detail={
                 "half_period": float(half_period),
+                # Also in seconds, because the sample count means nothing
+                # without knowing the rate it was sampled at.
+                "half_period_s": float(half_period_s),
+                "cadence_hz": float(cadence.rate_hz),
+                "cadence_coverage": float(cadence.coverage),
                 "cycles": float(cycles),
                 "periodicity": float(periodicity),
                 "swing_ratio": float(swing),

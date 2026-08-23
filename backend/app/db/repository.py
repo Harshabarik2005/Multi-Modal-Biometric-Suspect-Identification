@@ -448,3 +448,24 @@ class WatchlistRepository:
                 select(AuditEvent).order_by(AuditEvent.created_at.desc()).limit(limit)
             )
         )
+
+    def events_of_kind(self, kind: str) -> list[AuditEvent]:
+        """Every event of one kind, oldest first and deliberately unlimited.
+
+        `audit_trail` takes a limit because it backs a listing. This backs a
+        question -- "has this already happened?" -- where a limit is a bug:
+        enrolments, retirements and reviews share the table, so a windowed scan
+        loses old records of one kind as other kinds accumulate, and the answer
+        silently flips from yes to no (LOG-08).
+
+        Unbounded is safe for the kinds this is used with. Alerts fire only on
+        human-confirmed decisions, so their count is bounded by how fast people
+        review, not by how much footage is processed.
+        """
+        return list(
+            self.session.scalars(
+                select(AuditEvent)
+                .where(AuditEvent.kind == kind)
+                .order_by(AuditEvent.created_at)
+            )
+        )

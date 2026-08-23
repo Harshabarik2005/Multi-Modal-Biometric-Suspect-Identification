@@ -159,6 +159,8 @@ class DetectionTrackingPipeline:
 
         self.detector = YOLOPersonDetector(self.settings, device=self.device)
         self.tracker = DeepSortTracker(self.settings, device=self.device)
+        #: Frame rate of the source currently being streamed. Set by `stream`.
+        self._source_fps = 30.0
 
     def stream(
         self, source: str | int | Path
@@ -175,6 +177,10 @@ class DetectionTrackingPipeline:
             frame_stride=video_cfg.frame_stride,
             max_frames=video_cfg.max_frames,
         ) as reader:
+            # Kept so the annotated writer can use the source's real frame
+            # rate. VideoReader already substitutes 30 for a file that reports
+            # a nonsense one, so this is never zero.
+            self._source_fps = reader.meta.fps
             logger.info(
                 "Opened %s (%dx%d @ %.2f fps, %s frames)",
                 source,
@@ -257,8 +263,17 @@ class DetectionTrackingPipeline:
     ) -> cv2.VideoWriter:
         path = self._annotated_path(source)
         height, width = frame_shape[:2]
-        # Output fps accounts for stride so the annotated video plays in real time.
-        fps = 30.0 / max(1, self.settings.video.frame_stride)
+
+        # The source's own frame rate, divided by the stride, so the annotated
+        # video plays at the speed the footage was shot at.
+        #
+        # This used to assume 30 fps regardless of what the file said, which
+        # the reader had already measured. 25 fps footage played 20% fast and
+        # 60 fps at half speed -- and because frame numbers are burnt into the
+        # annotation, the timestamps stopped agreeing with where they appear in
+        # the clip. On a recording that has to stand up as evidence, that is
+        # not a cosmetic difference.
+        fps = self._source_fps / max(1, self.settings.video.frame_stride)
         writer = cv2.VideoWriter(
             str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height)
         )

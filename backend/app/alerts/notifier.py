@@ -305,11 +305,16 @@ class AlertDispatcher:
         self.dry_run = dry_run
 
     def already_sent(self) -> set[int]:
-        """Decision ids that have already been alerted, from the audit trail."""
+        """Decision ids that have already been alerted, from the audit trail.
+
+        Filtered on kind rather than taken from the last N events of every
+        kind. Under the old windowed scan, enough enrolments and reviews would
+        push older `alert_sent` records out of view and those decisions would
+        be notified again -- which to the recipient reads as a second sighting
+        of the same person, at a time when nobody saw them (LOG-08).
+        """
         sent: set[int] = set()
-        for event in self.repo.audit_trail(limit=5000):
-            if event.kind != ALERT_SENT:
-                continue
+        for event in self.repo.events_of_kind(ALERT_SENT):
             try:
                 decision_id = json.loads(event.detail_json or "{}").get("decision_id")
             except json.JSONDecodeError:

@@ -56,8 +56,50 @@ class TrackVerdict:
     modality: str = "-"
     # Full per-modality breakdown of the winning score, for the audit log.
     breakdown: str = ""
+    # What produced the winning score. Kept so one decision can be written per
+    # track after the clip, rather than one per re-match during it (LOG-10).
+    best_weights: dict = field(default_factory=dict)
+    best_calibrated: dict = field(default_factory=dict)
     # Every above-threshold hit, for the audit log section 8 requires.
     hits: list[tuple[int, str, float]] = field(default_factory=list)
+
+
+def record_verdicts(
+    repo,
+    verdicts: dict[int, TrackVerdict],
+    strategy_name: str,
+    camera_id: str = "",
+) -> int:
+    """Write one PENDING decision per matched track. Returns how many.
+
+    One per *track*, using its best moment -- not one per frame that happened
+    to clear the threshold. A person walking across a camera clears it in
+    dozens of consecutive frames, and a decision for each fills the review
+    queue with the same sighting over and over until the queue is too noisy to
+    read. The API path already worked this way; this script did not, and the
+    README points people here (LOG-10).
+
+    PENDING, always. Nothing downstream may act on one until a human reviews
+    it, and that is enforced by the schema rather than by this script.
+    """
+    recorded = 0
+    for verdict in sorted(
+        verdicts.values(), key=lambda v: v.best_similarity, reverse=True
+    ):
+        if verdict.times_matched == 0 or verdict.best_person_id is None:
+            continue
+        repo.record_match(
+            verdict.best_person_id,
+            track_id=verdict.track_id,
+            score=verdict.best_similarity,
+            strategy=strategy_name,
+            weights=verdict.best_weights,
+            calibrated=verdict.best_calibrated,
+            camera_id=camera_id,
+            frame_index=verdict.best_frame,
+        )
+        recorded += 1
+    return recorded
 
 
 def _report(
@@ -281,6 +323,10 @@ def run(args: argparse.Namespace) -> int:
                 verdict.breakdown = (
                     best.fusion.explain() if best.fusion else best.explain()
                 )
+                verdict.best_weights = dict(best.weights)
+                verdict.best_calibrated = (
+                    dict(best.fusion.calibrated) if best.fusion else {}
+                )
 
             if best.fused_similarity >= settings.fusion.threshold:
                 verdict.times_matched += 1
@@ -291,26 +337,6 @@ def run(args: argparse.Namespace) -> int:
                         best.fused_similarity,
                     )
                 )
-                # Audit trail: every match decision is logged with what drove it.
-                if repo is not None and args.record:
-                    # Written as PENDING. Nothing downstream may act on it
-                    # until a named human reviews it -- the confirm step is
-                    # enforced by the schema, not by this script.
-                    calibrated = (
-                        best.fusion.calibrated if best.fusion else {}
-                    )
-                    repo.record_match(
-                        best.person.person_id,
-                        track_id=track_id,
-                        score=best.fused_similarity,
-                        strategy=strategy.name,
-                        weights=best.weights,
-                        calibrated=calibrated,
-                        camera_id=args.camera_id,
-                        frame_index=result.frame_index,
-                    )
-                    recorded += 1
-
                 # Audit trail (build plan, section 8): every match decision
                 # is logged with the per-modality weights that produced it, so
                 # a reviewer can later see what the system actually relied on.
@@ -322,6 +348,9 @@ def run(args: argparse.Namespace) -> int:
                     best.fusion.explain() if best.fusion else "n/a",
                     best.explain(),
                 )
+
+    if repo is not None and args.record:
+        recorded = record_verdicts(repo, verdicts, strategy.name, args.camera_id)
 
     matched = _report(
         verdicts, settings.fusion.threshold, args.show_all, recorded

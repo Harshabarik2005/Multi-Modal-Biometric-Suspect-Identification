@@ -257,3 +257,56 @@ class TestTransportConfiguration:
         )
         assert reference == "console:1"
         assert "subject" in capsys.readouterr().out
+
+
+class TestAlertsAreNotResent:
+    """LOG-08: 'exactly once' held only until the audit trail filled up.
+
+    `already_sent` scanned the last 5,000 audit events of *every* kind.
+    Enrolments, retirements and reviews share that table, so on a busy
+    deployment older `alert_sent` records fall out of the window and those
+    decisions get notified again -- which to the recipient reads as a fresh
+    sighting of the person, at a time when nobody saw them.
+    """
+
+    def test_an_old_alert_survives_a_flood_of_other_events(self, repo) -> None:
+        from app.alerts.notifier import ALERT_SENT, AlertDispatcher
+
+        decision = repo.record_match("ravi", track_id=1, score=0.95)
+        repo.review(decision.id, "alice", DecisionStatus.CONFIRMED)
+        repo.log(
+            ALERT_SENT,
+            actor="dispatcher",
+            subject="ravi",
+            detail={"decision_id": decision.id},
+        )
+
+        dispatcher = AlertDispatcher(repo, dry_run=True)
+        assert dispatcher.already_sent() == {decision.id}
+
+        # Bury it under far more events than the old window held.
+        for index in range(5100):
+            repo.log("enroll", actor="bulk", subject=f"person-{index}")
+        repo.session.commit()
+
+        assert dispatcher.already_sent() == {decision.id}, (
+            "the alert record fell out of view, so this would be sent again"
+        )
+
+    def test_a_confirmed_decision_is_dispatched_only_once(self, repo) -> None:
+        from app.alerts.notifier import AlertDispatcher
+
+        decision = repo.record_match("ravi", track_id=1, score=0.95)
+        repo.review(decision.id, "alice", DecisionStatus.CONFIRMED)
+
+        notifier = RecordingNotifier()
+        dispatcher = AlertDispatcher(repo, notifier=notifier, dry_run=False)
+        dispatcher.dispatch()
+        assert len(notifier.sent) == 1
+
+        for index in range(5100):
+            repo.log("enroll", actor="bulk", subject=f"person-{index}")
+        repo.session.commit()
+
+        dispatcher.dispatch()
+        assert len(notifier.sent) == 1, "the same sighting was reported twice"

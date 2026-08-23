@@ -91,10 +91,26 @@ gait:
   # One gait cycle is ~20-30 frames at 25fps. Below min_frames the branch
   # reports no signal rather than guessing from half a step.
   min_frames: 20
-  # At 25fps a half gait cycle is ~10-15 frames. Short lags are where
-  # segmentation jitter fakes periodicity, so the floor is deliberately high.
-  min_half_period: 7
-  max_half_period: 40
+  # Plausible half-cycle period, IN SECONDS (LOG-06). These were frame counts,
+  # which assumed 25fps with nothing skipped. Set video.frame_stride: 5 and a
+  # real half-cycle became ~2.4 samples, under the old floor of 7, so gait
+  # reported nothing for everybody and it looked like poor footage rather than
+  # configuration. Lag bounds now come from the measured sample rate.
+  # 0.28-1.6s spans a run to a slow walk; at 25fps stride 1 that is 7 and 40
+  # samples, exactly the old values, so tuned footage behaves as before.
+  min_half_period_s: 0.28
+  max_half_period_s: 1.6
+  # Assumed rate when silhouettes carry no timestamps (hand-built sequences).
+  assumed_fps: 25.0
+  # Below this fraction of the cadence grid backed by a real silhouette, the
+  # signal is mostly interpolation across gaps, and a period recovered from it
+  # describes np.interp rather than a walk.
+  min_cadence_coverage: 0.6
+  # Samples the shortest half cycle must span before cadence is believed.
+  # Below ~3, autocorrelation locks onto the full cycle and reports twice the
+  # real period with high confidence. At 25fps this allows frame_stride up to
+  # 2; beyond that gait refuses rather than reporting a wrong cadence.
+  min_samples_per_half_period: 3.0
   # A stationary person filmed by a panning camera still produces weak
   # periodicity from mask jitter (measured 0.18-0.32 on such footage). These
   # two gates are what stop that being reported as a walk.

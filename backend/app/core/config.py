@@ -117,12 +117,36 @@ class GaitSettings(BaseModel):
     # A gait cycle is roughly 20-30 frames at 25fps. Below `min_frames` there
     # is not enough signal and the branch reports nothing rather than guessing.
     min_frames: int = 20
-    # Plausible half-cycle period in frames, used to bound the autocorrelation
-    # search. At 25fps a half gait cycle is ~10-15 frames; below 7 you are into
-    # sprinting territory, and short lags are exactly where segmentation jitter
-    # produces fake periodicity.
-    min_half_period: int = 7
-    max_half_period: int = 40
+    # Plausible half-cycle period, IN SECONDS (LOG-06).
+    #
+    # These were frame counts, which quietly assumed the stream was 25fps with
+    # no frames skipped. Set video.frame_stride to 5 and a real half-cycle of
+    # ~12 source frames becomes ~2.4 samples -- under the old floor of 7 -- so
+    # gait reported no signal for everybody, and it read as poor footage rather
+    # than as configuration. The lag bounds are now derived from the measured
+    # sample rate, so they follow the stride and the source frame rate.
+    #
+    # 0.28s to 1.6s covers a run through to a slow walk. At 25fps with stride 1
+    # they work out to 7 and 40 samples, which is what the old frame counts
+    # were, so the behaviour on the footage this was tuned against is unchanged.
+    min_half_period_s: float = 0.28
+    max_half_period_s: float = 1.6
+
+    # Sampling rate assumed when silhouettes carry no timestamps -- hand-built
+    # sequences, mostly. Real footage always carries them.
+    assumed_fps: float = 25.0
+
+    # Below this fraction of the cadence grid backed by a real silhouette, the
+    # signal is mostly interpolation across gaps and any period recovered from
+    # it describes np.interp rather than a walk.
+    min_cadence_coverage: float = Field(0.6, ge=0.0, le=1.0)
+
+    # Samples the shortest half cycle of interest must span before cadence is
+    # believed. Below about three, autocorrelation does not fail -- it locks
+    # onto the full cycle and confidently reports twice the real period, which
+    # then gets weighted as evidence. At 25fps this allows frame_stride up to
+    # 2; beyond that gait refuses rather than guessing.
+    min_samples_per_half_period: float = 3.0
 
     # Autocorrelation strength below which the signal is not a walk. Panning
     # over a stationary person produces weak periodicity from mask jitter --

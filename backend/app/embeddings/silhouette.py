@@ -47,6 +47,15 @@ class Silhouette:
     coverage: float
     #: True when the mask touches the frame edge, so the body is likely cut off.
     clipped: bool
+    #: When this frame was captured, in seconds from the start of the source.
+    #:
+    #: Cadence is a rate, so it can only be recovered in real time. Frame
+    #: counts are not real time: `extract` drops frames whose mask fails, and
+    #: `video.frame_stride` skips frames before that, so consecutive
+    #: silhouettes can be any distance apart (LOG-06). Defaults to -1, meaning
+    #: unknown, which makes the analysis fall back to assuming uniform
+    #: sampling.
+    timestamp_s: float = -1.0
 
 
 class SilhouetteExtractor:
@@ -206,6 +215,7 @@ class SilhouetteExtractor:
                     image=normalised,
                     coverage=coverage,
                     clipped=clipped,
+                    timestamp_s=observation.timestamp_s,
                 )
             )
 

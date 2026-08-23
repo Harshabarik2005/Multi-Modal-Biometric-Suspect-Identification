@@ -107,3 +107,50 @@ class TestEndToEnd:
         # A confirmed track must survive at least n_init frames.
         longest = max(stats.frame_count for stats in report.tracks.values())
         assert longest >= settings.tracking.n_init
+
+
+class TestAnnotatedVideoTiming:
+    """LOG-07: the writer invented a frame rate the reader had already measured."""
+
+    def test_the_writer_uses_the_source_frame_rate(self, tmp_path, monkeypatch) -> None:
+        import cv2
+        import numpy as np
+
+        from app.core.config import get_settings
+        from app.pipeline import DetectionTrackingPipeline
+
+        # 25 fps: the case that played 20% fast under the old fixed 30.0.
+        source = tmp_path / "25fps.mp4"
+        writer = cv2.VideoWriter(
+            str(source), cv2.VideoWriter_fourcc(*"mp4v"), 25.0, (64, 48)
+        )
+        for _ in range(5):
+            writer.write(np.zeros((48, 64, 3), dtype=np.uint8))
+        writer.release()
+
+        settings = get_settings()
+        monkeypatch.setattr(settings.paths, "output_dir", tmp_path)
+
+        pipeline = DetectionTrackingPipeline.__new__(DetectionTrackingPipeline)
+        pipeline.settings = settings
+        pipeline._source_fps = 25.0
+
+        opened = {}
+
+        class FakeWriter:
+            def isOpened(self):
+                return True
+
+        def capture(path, fourcc, fps, size):
+            opened["fps"] = fps
+            return FakeWriter()
+
+        monkeypatch.setattr(cv2, "VideoWriter", capture)
+        monkeypatch.setattr(settings.video, "frame_stride", 1)
+        pipeline._open_writer(source, (48, 64, 3))
+        assert opened["fps"] == 25.0
+
+        # Stride still divides it, so the output plays in real time.
+        monkeypatch.setattr(settings.video, "frame_stride", 5)
+        pipeline._open_writer(source, (48, 64, 3))
+        assert opened["fps"] == 5.0

@@ -138,6 +138,15 @@ excellent face reference and no gait reference at all — gait needs several ful
 step cycles. Enroll from footage of the person walking if you want both, and
 `enroll.py --inspect <id>` will show which modalities were actually stored.
 
+**Gait limits how far you can raise `video.frame_stride`.** Cadence is a rate,
+so it can only be recovered if frames arrive often enough to sample it. At 25
+fps a stride of 1 or 2 is fine; at 5 a half step-cycle arrives as roughly two
+samples, and autocorrelation on two samples does not report uncertainty — it
+locks onto the full cycle and returns a confident number twice the truth. Gait
+refuses below that and says so in the log, rather than feeding a wrong cadence
+into a score a human is asked to trust. Face and appearance are unaffected, so
+a high stride is still the right lever when you do not need gait.
+
 **Scores are fused and calibrated.** The three modalities produce
 similarities on completely different scales — two different people score 0.03
 by face but 0.755 by re-ID (measured against ImageNet weights; see below) — so each is mapped onto a common 0–1 scale before
