@@ -100,6 +100,19 @@ def serve(args) -> int:
 
     from app.api.main import create_app
 
+    if args.demo:
+        settings.demo_mode = True
+        for line in (
+            "",
+            "  !! SIGN-IN IS OFF (--demo) !!",
+            "  Anyone who can reach this port can read the watchlist and",
+            "  confirm an identification. Every action is recorded against",
+            "  the 'demo' operator, so the trail shows nothing about who",
+            "  actually did it. Prototype use only.",
+            "",
+        ):
+            print(line)
+
     app = create_app(settings, engine=make_engine(database_url))
     print(f"Database : {database_url}")
     print(f"Docs     : http://{args.host}:{args.port}/docs\n")
@@ -109,6 +122,15 @@ def serve(args) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument(
+        "--demo",
+        action="store_true",
+        help=(
+            "Skip sign-in entirely. For showing the prototype. Every action is "
+            "recorded against a 'demo' operator and anyone who can reach the "
+            "port can take any action, including confirming an identification."
+        ),
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument(

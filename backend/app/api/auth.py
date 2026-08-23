@@ -52,6 +52,7 @@ from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.db.models import Operator
 
@@ -198,6 +199,43 @@ def get_auth_session() -> Session:  # pragma: no cover - set by the app factory
     raise RuntimeError("Auth session dependency was not configured.")
 
 
+#: Who a review is recorded against when sign-in is switched off.
+DEMO_USERNAME = "demo"
+DEMO_DISPLAY_NAME = "Demo — no sign-in"
+
+
+def demo_operator(session: Session) -> Operator:
+    """The stand-in principal used while `demo_mode` is on.
+
+    Created on first use rather than seeded, so a database that has never run
+    in demo mode does not carry a passwordless account in it. The password
+    hash is random and nothing can log in as this account: it exists to be
+    written into decision reviews, not to authenticate.
+    """
+    operator = (
+        session.query(Operator).filter(Operator.username == DEMO_USERNAME).first()
+    )
+    if operator is not None:
+        return operator
+
+    salt, digest = hash_password(secrets.token_urlsafe(32))
+    operator = Operator(
+        username=DEMO_USERNAME,
+        display_name=DEMO_DISPLAY_NAME,
+        password_salt=salt,
+        password_hash=digest,
+        is_admin=True,
+    )
+    session.add(operator)
+    session.commit()
+    logger.warning(
+        "Demo mode: created the %r operator. Every action is recorded against "
+        "it, and anyone who can reach this port can take any action.",
+        DEMO_USERNAME,
+    )
+    return operator
+
+
 def require_operator(
     request: Request,
     session: Annotated[Session, Depends(get_auth_session)],
@@ -210,6 +248,15 @@ def require_operator(
     The returned `Operator` is the ONLY acceptable source of identity for a
     review. Anything the request body claims about who is acting is decoration.
     """
+    if get_settings().demo_mode:
+        # Prototype mode: no sign-in, but still a named operator, so a review
+        # is attributable to *something* and the audit trail keeps its shape.
+        # The name is deliberately unmistakable -- a trail full of "demo"
+        # cannot later be mistaken for a record of who actually decided.
+        operator = demo_operator(session)
+        request.state.operator = operator
+        return operator
+
     if credentials is None or not credentials.credentials:
         raise HTTPException(
             status.HTTP_401_UNAUTHORIZED,

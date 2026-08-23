@@ -894,3 +894,94 @@ class TestImportingTheAppBuildsNothing:
 
         with pytest.raises(AttributeError):
             main.does_not_exist
+
+
+class TestDemoModeIsOffUnlessAskedFor:
+    """Sign-in can be switched off for showing the prototype (SEC-01 stands).
+
+    The mechanism is not deleted -- reviews still record a named operator, so
+    the audit trail keeps its shape and turning it back on needs no migration.
+    What must not happen is shipping open by default, which is the shape of
+    SEC-06 all over again.
+    """
+
+    def test_the_default_is_authenticated(self) -> None:
+        from app.core.config import Settings
+
+        assert Settings().demo_mode is False
+
+    def test_routes_are_locked_by_default(self, anon_client) -> None:
+        assert anon_client.get("/api/watchlist").status_code == 401
+        assert anon_client.get("/api/auth/me").status_code == 401
+
+    def test_demo_mode_opens_the_door(self, anon_client, monkeypatch) -> None:
+        from app.core.config import get_settings
+
+        monkeypatch.setattr(get_settings(), "demo_mode", True)
+
+        assert anon_client.get("/api/watchlist").status_code == 200
+
+        me = anon_client.get("/api/auth/me")
+        assert me.status_code == 200
+        assert me.json()["demo_mode"] is True
+        assert me.json()["username"] == "demo"
+
+    def test_the_console_is_told_sign_in_is_off(self, anon_client, monkeypatch) -> None:
+        """Nobody should demo this believing it is locked."""
+        from app.core.config import get_settings
+
+        monkeypatch.setattr(get_settings(), "demo_mode", True)
+
+        warnings = anon_client.get("/api/stats").json()["warnings"]
+        assert any("Sign-in is off" in w for w in warnings)
+
+    def test_decisions_still_name_an_operator(self, anon_client, monkeypatch) -> None:
+        """A review with no operator at all would break the audit trail."""
+        from app.core.config import get_settings
+        from app.core.types import Modality, ModalityEmbedding
+        from app.db.repository import WatchlistRepository, session_factory
+
+        monkeypatch.setattr(get_settings(), "demo_mode", True)
+
+        session = session_factory(anon_client.engine)()
+        try:
+            repo = WatchlistRepository(session)
+            repo.enroll(
+                "ravi",
+                "Ravi",
+                {
+                    Modality.FACE: ModalityEmbedding(
+                        modality=Modality.FACE,
+                        vector=np.ones(8, dtype=np.float32),
+                        quality=0.9,
+                        frames_used=5,
+                    )
+                },
+            )
+            decision = repo.record_match("ravi", track_id=1, score=0.9)
+        finally:
+            session.close()
+
+        response = anon_client.post(
+            f"/api/decisions/{decision.id}/review",
+            json={"verdict": "confirmed", "reason": "prototype"},
+        )
+        assert response.status_code == 200
+        assert response.json()["reviews"][0]["operator"] == "demo"
+
+    def test_the_demo_account_cannot_be_logged_into(self, anon_client, monkeypatch) -> None:
+        """It exists to be written into reviews, not to authenticate."""
+        from app.core.config import get_settings
+
+        monkeypatch.setattr(get_settings(), "demo_mode", True)
+        anon_client.get("/api/auth/me")  # creates the account
+
+        monkeypatch.setattr(get_settings(), "demo_mode", False)
+        for password in ("demo", "", "demo-password", "password"):
+            response = anon_client.post(
+                "/api/auth/login", json={"username": "demo", "password": password}
+            )
+            # 401 for a wrong password, 422 where the input never gets that
+            # far. Either way no token comes back, which is the claim.
+            assert response.status_code in (401, 422), password
+            assert "token" not in response.json()

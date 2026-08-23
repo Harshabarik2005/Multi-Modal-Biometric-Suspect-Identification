@@ -447,6 +447,20 @@ class Settings(BaseSettings):
             YamlConfigSettingsSource(settings_cls, yaml_file=_active_config_path),
         )
 
+    #: Skip sign-in entirely and treat every request as a fixed demo operator.
+    #:
+    #: For showing the prototype, where a login screen is friction and there is
+    #: nothing real behind it. It does NOT delete the mechanism: reviews are
+    #: still recorded against a named operator, so the audit trail keeps its
+    #: shape and turning this back off restores real accounts with no
+    #: migration. The operator it records is obviously fake, which is the
+    #: honest thing for a trail nobody should later mistake for evidence.
+    #:
+    #: Off by default, and it has to stay that way. An identification system
+    #: that ships open because the safe setting was the one you had to
+    #: remember is the shape of SEC-06, which this project already fixed once.
+    demo_mode: bool = False
+
     def resolve_device(self) -> str:
         """Turn `device: auto` into a concrete torch device string."""
         if self.device != "auto":

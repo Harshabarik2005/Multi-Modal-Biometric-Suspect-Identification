@@ -346,6 +346,19 @@ cd frontend && npm install && npm run dev
 
 Open `http://localhost:4173`.
 
+**Showing the prototype?** Start the API with `--demo` and there is no sign-in
+at all — the console opens straight onto the console:
+
+```bash
+cd backend && python scripts/serve.py --demo
+```
+
+Every action is then recorded against a shared `demo` operator, the server
+prints a warning on start, and the console says so on every page. It is off
+unless you ask for it, because an identification system that ships open
+because the safe setting was the one you had to remember is not a system
+anyone should trust. Everything below applies when it is off.
+
 **You need an account to get in.** There is no self-registration, deliberately:
 shell access to the host is the right bar for a system that can confirm an
 identification of a real person. Create the first one on the server:

@@ -115,7 +115,7 @@ function AppearanceCaution({ weights }) {
  * Review queue
  * ------------------------------------------------------------------ */
 
-function DecisionCard({ decision, onReviewed, onError }) {
+function DecisionCard({ decision, demoMode, onReviewed, onError }) {
   const [reason, setReason] = useState('')
   const [busy, setBusy] = useState(false)
 
@@ -225,13 +225,17 @@ function DecisionCard({ decision, onReviewed, onError }) {
       <p className="muted small" style={{ marginTop: 12 }}>
         Raised {new Date(decision.created_at).toLocaleString()}. Nothing has
         happened yet — confirming is what makes this actionable, and it is
-        recorded against your account.
+        recorded{' '}
+        {demoMode
+          ? 'against a shared demo operator, not against you'
+          : 'against your account'}
+        .
       </p>
     </article>
   )
 }
 
-function ReviewQueue({ onError }) {
+function ReviewQueue({ demoMode, onError }) {
   const [decisions, setDecisions] = useState([])
   const [loading, setLoading] = useState(true)
 
@@ -282,6 +286,7 @@ function ReviewQueue({ onError }) {
           <DecisionCard
             key={decision.id}
             decision={decision}
+            demoMode={demoMode}
             onReviewed={load}
             onError={onError}
           />
@@ -414,6 +419,7 @@ const TABS = [
 
 export default function App() {
   const [session, setSession] = useState(null)
+  const [checking, setChecking] = useState(true)
   const [tab, setTab] = useState('register')
   const [error, setError] = useState(null)
   const [stats, setStats] = useState(null)
@@ -433,10 +439,31 @@ export default function App() {
     return () => setUnauthorizedHandler(null)
   }, [])
 
+  // Ask who we are before showing anything. With sign-in switched off the
+  // server answers without a token, and the login screen is skipped entirely
+  // — a prototype should not make someone type credentials that mean nothing.
+  useEffect(() => {
+    api
+      .me()
+      .then(setSession)
+      .catch(() => setSession(null))
+      .finally(() => setChecking(false))
+  }, [])
+
   useEffect(() => {
     if (!session) return
     api.stats().then(setStats).catch(() => setStats(null))
   }, [session, version, tab])
+
+  if (checking) {
+    return (
+      <div className="app">
+        <p className="muted small" style={{ paddingTop: 32 }}>
+          Loading…
+        </p>
+      </div>
+    )
+  }
 
   if (!session) {
     return (
@@ -473,12 +500,22 @@ export default function App() {
               used to be split by a <br>, which read out as
               "Demo Operatorsigned in" with no pause and no space. */}
           <span className="session-who">
-            Signed in as{' '}
-            <strong>{session.display_name || session.username}</strong>
+            {session.demo_mode ? (
+              <>
+                <strong>Demo</strong> — sign-in off
+              </>
+            ) : (
+              <>
+                Signed in as{' '}
+                <strong>{session.display_name || session.username}</strong>
+              </>
+            )}
           </span>
-          <button className="btn btn-quiet btn-small" onClick={signOut}>
-            Sign out
-          </button>
+          {!session.demo_mode && (
+            <button className="btn btn-quiet btn-small" onClick={signOut}>
+              Sign out
+            </button>
+          )}
         </div>
       </header>
 
@@ -518,7 +555,13 @@ export default function App() {
         {tab === 'register' && <Register onError={onError} onRegistered={bump} />}
         {tab === 'records' && <Records key={version} onError={onError} />}
         {tab === 'identify' && <Identify onError={onError} onScanned={bump} />}
-        {tab === 'review' && <ReviewQueue key={version} onError={onError} />}
+        {tab === 'review' && (
+          <ReviewQueue
+            key={version}
+            demoMode={session.demo_mode}
+            onError={onError}
+          />
+        )}
         {tab === 'activity' && <Activity key={version} onError={onError} />}
       </main>
 
@@ -526,7 +569,10 @@ export default function App() {
         This system does not act on its own. Every candidate is a suggestion for
         a person to confirm or reject, the reasoning behind each one is shown so
         it can be judged rather than trusted, and whatever you decide is
-        recorded against your account.
+        recorded{' '}
+        {session.demo_mode
+          ? 'against a shared demo operator — this build cannot tell who you are.'
+          : 'against your account.'}
       </p>
     </div>
   )

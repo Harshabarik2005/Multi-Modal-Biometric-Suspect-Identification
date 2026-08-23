@@ -196,6 +196,9 @@ class MeOut(BaseModel):
     username: str
     display_name: str
     is_admin: bool
+    #: True when sign-in is switched off. The console reads this to skip the
+    #: login screen, and to say on every page that nothing is authenticated.
+    demo_mode: bool = False
 
 
 class AuditOut(BaseModel):
@@ -246,10 +249,16 @@ def login(
 
 @router.get("/auth/me", response_model=MeOut, tags=["auth"])
 def whoami(operator: CurrentOperator) -> MeOut:
+    """Who the caller is.
+
+    In demo mode this answers without a token, which is how the console knows
+    to skip the sign-in screen rather than showing it and failing.
+    """
     return MeOut(
         username=operator.username,
         display_name=operator.display_name,
         is_admin=operator.is_admin,
+        demo_mode=get_settings().demo_mode,
     )
 
 
@@ -472,6 +481,14 @@ def stats(repo: Repo, operator: CurrentOperator) -> dict:
             "weights, which are not trained for person re-identification. "
             "Appearance similarity between two different people will be much "
             "higher than it should be."
+        )
+
+    if settings.demo_mode:
+        warnings.append(
+            "Sign-in is off. Anyone who can reach this server can read the "
+            "watchlist and confirm an identification, and every decision is "
+            "recorded against a shared 'demo' operator rather than a person. "
+            "Prototype use only."
         )
 
     unstamped = repo.templates_without_a_model()
