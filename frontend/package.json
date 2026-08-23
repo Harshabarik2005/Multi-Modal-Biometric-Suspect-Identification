@@ -5,9 +5,9 @@
   "type": "module",
   "description": "Review queue, watchlist and explainability view for Faceless FRS",
   "scripts": {
-    "dev": "vite",
+    "dev": "vite --host 0.0.0.0 --port 4173",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview --host 0.0.0.0 --port 4173"
   },
   "dependencies": {
     "react": "^18.3.1",

@@ -4,7 +4,7 @@ React + Vite dashboard for reviewing candidate identifications.
 
 ```bash
 npm install
-npm run dev      # http://localhost:5173
+npm run dev      # http://localhost:4173
 ```
 
 The backend must be running (`cd backend && python scripts/serve.py`). Vite

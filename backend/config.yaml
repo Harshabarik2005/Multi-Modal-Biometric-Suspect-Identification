@@ -255,4 +255,4 @@ alerts:
   twilio_to_numbers: ""     # comma-separated
 
   # Linked from SMS alerts, which are too short to carry the full breakdown.
-  console_url: "http://localhost:5173"
+  console_url: "http://localhost:4173"

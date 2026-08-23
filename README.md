@@ -344,7 +344,7 @@ cd backend && python scripts/serve.py
 cd frontend && npm install && npm run dev
 ```
 
-Open `http://localhost:5173`.
+Open `http://localhost:4173`.
 
 **You need an account to get in.** There is no self-registration, deliberately:
 shell access to the host is the right bar for a system that can confirm an
@@ -405,7 +405,7 @@ cd backend && python scripts/serve.py
 cd frontend && npm install && npm run dev
 ```
 
-Then open `http://localhost:5173`. Feed it candidates by running the matcher
+Then open `http://localhost:4173`. Feed it candidates by running the matcher
 with `--record`:
 
 ```bash

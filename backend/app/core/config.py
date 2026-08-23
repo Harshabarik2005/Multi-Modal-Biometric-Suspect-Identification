@@ -367,7 +367,7 @@ class AlertSettings(BaseModel):
     twilio_to_numbers: str = ""
 
     #: Included in SMS, which is too short to carry the full breakdown.
-    console_url: str = "http://localhost:5173"
+    console_url: str = "http://localhost:4173"
 
     @staticmethod
     def split(value: str) -> list[str]:
