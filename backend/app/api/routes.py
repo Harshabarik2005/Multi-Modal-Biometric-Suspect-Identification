@@ -29,7 +29,9 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.api.auth import CurrentOperator, authenticate, issue_token
+from app.core.config import get_settings
 from app.core.logging import get_logger
+from app.embeddings.reid import NON_REID_WEIGHTS
 from app.db.models import DecisionStatus, MatchDecision, Operator, Person
 from app.db.repository import WatchlistRepository
 
@@ -400,8 +402,37 @@ def health() -> dict:
 
 @router.get("/stats", tags=["meta"])
 def stats(repo: Repo, operator: CurrentOperator) -> dict:
-    """The counts /health used to give away."""
+    """The counts /health used to give away, plus anything the console should
+    be warning its operators about."""
+    settings = get_settings()
+
+    # Warnings an operator needs in front of them, not buried in a server log
+    # they will never read. Someone judging a candidate match deserves to know
+    # the score they are judging is not calibrated for the model that produced
+    # it (DES-01).
+    warnings: list[str] = []
+    mismatch = settings.reid_calibration_mismatch()
+    if mismatch:
+        warnings.append(mismatch)
+    if settings.reid.weights in NON_REID_WEIGHTS:
+        warnings.append(
+            f"The appearance branch is running {settings.reid.weights!r} "
+            "weights, which are not trained for person re-identification. "
+            "Appearance similarity between two different people will be much "
+            "higher than it should be."
+        )
+
+    unstamped = repo.templates_without_a_model()
+    if unstamped:
+        warnings.append(
+            f"{unstamped} stored template(s) do not record which model "
+            "produced them, so they cannot be checked against the model now "
+            "running. If they were enrolled before reid.weights was changed, "
+            "their similarity scores are meaningless. Re-enrol to be sure."
+        )
+
     return {
         "watchlist": len(repo.list_people()),
         "pending_decisions": len(repo.pending_decisions(limit=1000)),
+        "warnings": warnings,
     }

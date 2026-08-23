@@ -47,6 +47,17 @@ class EmbeddingBranch(ABC):
     #: than guessing. Gait needs far more than face.
     min_observations: int = 1
 
+    @property
+    def model_id(self) -> str:
+        """Which model this branch is running, e.g. "osnet_x1_0/msmt17".
+
+        Stamped onto every embedding so a stored reference and a live probe
+        can be checked for having come from the same space before their cosine
+        similarity is believed (DES-01). Branches that do not override this
+        return "", which reads as "unknown" and is never treated as a match.
+        """
+        return ""
+
     @abstractmethod
     def embed(self, observations: Sequence[TrackObservation]) -> ModalityEmbedding:
         """Encode one track's observations. Never raises on 'no signal'.
@@ -111,6 +122,7 @@ class PerFrameBranch(EmbeddingBranch):
 
         return ModalityEmbedding(
             modality=self.modality,
+            model_id=self.model_id,
             vector=l2_normalize(pooled),
             # Track-level quality is the best single look, not the mean: one
             # unambiguous frame is enough to trust the identification, and

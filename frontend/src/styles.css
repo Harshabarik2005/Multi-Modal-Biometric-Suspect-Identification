@@ -195,3 +195,14 @@ input[type="password"] {
 input[type="password"]:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 .session { display: flex; align-items: center; gap: 10px; }
+
+/* Deployment warnings: the operator judging a match needs to know the score
+   they are judging is not calibrated for the model that produced it. */
+.banner {
+  border: 1px solid var(--warn);
+  border-radius: 6px;
+  padding: 10px 14px;
+  margin: 12px 0;
+}
+.banner ul { margin: 6px 0 0; padding-left: 18px; }
+.banner li { margin: 4px 0; font-size: 0.85rem; }

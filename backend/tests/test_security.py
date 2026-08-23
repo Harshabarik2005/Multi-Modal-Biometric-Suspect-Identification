@@ -321,3 +321,250 @@ class TestEncryptionIsNotOptional:
         assert store._encode_vectors(
             {"face": np.zeros(4, dtype=np.float32)}
         ).startswith(b"FRSENC1:")
+
+
+class TestReIDWeightsAreReIDWeights:
+    """DES-01: the branch was running ImageNet weights, not re-ID weights.
+
+    OSNet without re-ID training gives generic visual features. Everything
+    anchored on the resulting scores -- reid_impostor, reid_threshold, the
+    calibration mapping, the fusion weights -- was calibrated against a model
+    that does not do the job the branch claims to do.
+    """
+
+    def test_the_imagenet_checkpoints_are_still_labelled_as_such(self) -> None:
+        """The ids are torchreid's ImageNet ones; the label must not drift."""
+        from app.embeddings.reid import PRETRAINED_URLS
+
+        assert (
+            PRETRAINED_URLS[("osnet_x1_0", "imagenet")]
+            == "https://drive.google.com/uc?id=1LaG1EJpHrxdAxKnSCJ_i0u-nbxSAeiFY"
+        )
+
+    def test_reid_trained_checkpoints_are_available(self) -> None:
+        from app.embeddings.reid import available_weights
+
+        assert {"msmt17", "market1501", "dukemtmcreid"} <= set(
+            available_weights("osnet_x1_0")
+        )
+
+    def test_the_default_is_not_imagenet(self) -> None:
+        from app.core.config import Settings
+        from app.embeddings.reid import NON_REID_WEIGHTS
+
+        assert Settings().reid.weights not in NON_REID_WEIGHTS
+
+    def test_the_weights_file_is_named_for_its_training_set(self) -> None:
+        """Otherwise switching weights silently reuses the cached old file."""
+        from app.embeddings.reid import ReIDEmbedder
+
+        embedder = ReIDEmbedder.__new__(ReIDEmbedder)
+        embedder.settings = get_settings()
+        embedder.cfg = get_settings().reid
+        embedder.weights = "msmt17"
+        assert embedder._weights_path().name == "osnet_x1_0_msmt17.pth"
+
+        embedder.weights = "imagenet"
+        assert embedder._weights_path().name == "osnet_x1_0_imagenet.pth"
+
+    def test_stale_calibration_is_reported(self) -> None:
+        """Anchors belong to one checkpoint; they do not transfer to another."""
+        settings = Settings()
+        settings.reid.weights = "msmt17"
+        settings.fusion.reid_anchors_measured_on = "imagenet"
+
+        message = settings.reid_calibration_mismatch()
+        assert message is not None
+        assert "imagenet" in message and "msmt17" in message
+
+        settings.fusion.reid_anchors_measured_on = "msmt17"
+        assert settings.reid_calibration_mismatch() is None
+
+    def test_the_operator_is_told_not_just_the_log(self, client, monkeypatch) -> None:
+        """Someone judging a match must see that its score is uncalibrated."""
+        settings = get_settings()
+        assert settings.reid_calibration_mismatch() is None, (
+            "the shipped config should be self-consistent"
+        )
+        assert client.get("/api/stats").json()["warnings"] == []
+
+        # Now make it stale, the way switching reid.weights would.
+        monkeypatch.setattr(
+            settings.fusion, "reid_anchors_measured_on", "imagenet"
+        )
+        warnings = client.get("/api/stats").json()["warnings"]
+        assert any("calibration" in w.lower() for w in warnings)
+
+    def test_an_unavailable_checkpoint_is_refused_by_name(self) -> None:
+        """osnet_x0_25 has no re-ID weights; asking must not fall back."""
+        from app.core.config import Settings
+        from app.embeddings.reid import ReIDEmbedder
+
+        settings = Settings()
+        settings.reid.model = "osnet_x0_25"
+        settings.reid.weights = "msmt17"
+
+        with pytest.raises(ValueError, match="No 'msmt17' checkpoint"):
+            ReIDEmbedder(settings=settings)
+
+
+class TestEmbeddingsCarryTheirModel:
+    """DES-01, second half: a reference is only comparable to a probe from the
+    same model.
+
+    Switching `reid.weights` is the right thing to do, and it silently
+    invalidates every template already enrolled. The vectors still load, still
+    have the right length, and still produce a cosine similarity -- one that
+    means nothing, because the two vectors live in unrelated spaces. Nothing
+    about that failure is visible in a score.
+    """
+
+    @staticmethod
+    def _embedding(model_id: str, seed: int) -> "ModalityEmbedding":
+        from app.core.types import Modality, ModalityEmbedding, l2_normalize
+
+        rng = np.random.default_rng(seed)
+        return ModalityEmbedding(
+            modality=Modality.REID,
+            vector=l2_normalize(rng.normal(size=64).astype(np.float32)),
+            quality=0.9,
+            frames_used=10,
+            model_id=model_id,
+        )
+
+    def test_a_mismatch_is_reported(self) -> None:
+        from app.matching.gallery import model_mismatch
+
+        probe = self._embedding("osnet_x1_0/msmt17", 1)
+        reference = self._embedding("osnet_x1_0/imagenet", 2)
+
+        message = model_mismatch(probe, reference)
+        assert message is not None
+        assert "msmt17" in message and "imagenet" in message
+        assert "Re-enrol" in message
+
+    def test_matching_models_compare(self) -> None:
+        from app.matching.gallery import model_mismatch
+
+        assert (
+            model_mismatch(
+                self._embedding("osnet_x1_0/msmt17", 1),
+                self._embedding("osnet_x1_0/msmt17", 2),
+            )
+            is None
+        )
+
+    def test_an_unknown_model_does_not_strand_old_enrolments(self) -> None:
+        """Refusing these would break every watchlist enrolled before this."""
+        from app.matching.gallery import model_mismatch
+
+        assert (
+            model_mismatch(
+                self._embedding("osnet_x1_0/msmt17", 1), self._embedding("", 2)
+            )
+            is None
+        )
+
+    def test_the_gallery_refuses_rather_than_scoring(self) -> None:
+        """A cross-model pair must read as 'could not compare', not as a low
+        score -- those mean completely different things to fusion."""
+        from app.core.types import Modality
+        from app.matching.gallery import Gallery, PersonRecord
+
+        gallery = Gallery()
+        gallery.add(
+            PersonRecord(
+                person_id="ravi",
+                display_name="Ravi",
+                embeddings={Modality.REID: self._embedding("osnet_x1_0/imagenet", 2)},
+            )
+        )
+
+        probe = self._embedding("osnet_x1_0/msmt17", 1)
+        score = gallery.rank({Modality.REID: probe})[0].scores[Modality.REID]
+
+        assert score.similarity is None
+        assert "different models" in score.incomparable_reason
+
+    def test_the_same_model_still_scores(self) -> None:
+        from app.core.types import Modality
+        from app.matching.gallery import Gallery, PersonRecord
+
+        reference = self._embedding("osnet_x1_0/msmt17", 2)
+        gallery = Gallery()
+        gallery.add(
+            PersonRecord(
+                person_id="ravi", display_name="Ravi",
+                embeddings={Modality.REID: reference},
+            )
+        )
+        score = gallery.rank({Modality.REID: reference})[0].scores[Modality.REID]
+        assert score.similarity == pytest.approx(1.0, abs=1e-5)
+
+    def test_the_model_survives_a_database_round_trip(self) -> None:
+        from app.core.types import Modality
+        from app.db.repository import (
+            WatchlistRepository,
+            create_schema,
+            session_factory,
+        )
+
+        engine = make_engine("sqlite:///:memory:")
+        create_schema(engine)
+        session = session_factory(engine)()
+        repo = WatchlistRepository(session)
+        try:
+            repo.enroll(
+                "ravi", "Ravi",
+                {Modality.REID: self._embedding("osnet_x1_0/msmt17", 3)},
+            )
+            record = repo.to_record(repo.get_person("ravi"))
+            assert record.embeddings[Modality.REID].model_id == "osnet_x1_0/msmt17"
+        finally:
+            session.close()
+
+    def test_an_older_database_gains_the_column(self) -> None:
+        """create_all does not ALTER, so an upgrade would break on first query."""
+        from sqlalchemy import inspect, text
+
+        from app.db.repository import create_schema
+
+        engine = make_engine("sqlite:///:memory:")
+        create_schema(engine)
+        with engine.begin() as connection:
+            connection.execute(text("ALTER TABLE templates DROP COLUMN model_id"))
+        assert "model_id" not in {
+            c["name"] for c in inspect(engine).get_columns("templates")
+        }
+
+        create_schema(engine)
+        assert "model_id" in {
+            c["name"] for c in inspect(engine).get_columns("templates")
+        }
+
+    def test_the_console_counts_unstamped_templates(self, client) -> None:
+        """The operator should be told their watchlist may predate a change."""
+        from sqlalchemy import text
+
+        from app.db.repository import WatchlistRepository, session_factory
+        from app.core.types import Modality
+
+        session = session_factory(client.engine)()
+        try:
+            repo = WatchlistRepository(session)
+            repo.enroll(
+                "ravi", "Ravi",
+                {Modality.REID: self._embedding("osnet_x1_0/msmt17", 4)},
+            )
+            assert repo.templates_without_a_model() == 0
+            assert client.get("/api/stats").json()["warnings"] == []
+
+            # An enrolment from before the model was recorded.
+            session.execute(text("UPDATE templates SET model_id = ''"))
+            session.commit()
+            assert repo.templates_without_a_model() == 1
+        finally:
+            session.close()
+
+        warnings = client.get("/api/stats").json()["warnings"]
+        assert any("do not record which model" in w for w in warnings)

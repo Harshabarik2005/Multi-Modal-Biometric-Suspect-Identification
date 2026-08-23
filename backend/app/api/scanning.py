@@ -147,6 +147,16 @@ def scan_video(
                     else {}
                 ),
                 "strategy": strategy.name,
+                # Modalities that had a signal but could not be compared --
+                # almost always a reference enrolled with a different model
+                # (DES-01). Without this the reviewer sees a face-only match
+                # and has no way to know appearance was dropped rather than
+                # simply absent.
+                "not_compared": {
+                    m.value: score.incomparable_reason
+                    for m, score in best.scores.items()
+                    if score.incomparable_reason
+                },
             }
 
     # Record once per track, using its best moment, rather than once per

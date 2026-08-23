@@ -496,6 +496,17 @@ export default function App() {
         recorded against your account.
       </p>
 
+      {stats?.warnings?.length > 0 && (
+        <div className="caution banner">
+          <strong>Scores on this deployment are not trustworthy yet.</strong>
+          <ul>
+            {stats.warnings.map((warning) => (
+              <li key={warning}>{warning}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       {error && (
         <div className="error" onClick={() => setError(null)}>
           {error} <span className="muted small">(click to dismiss)</span>

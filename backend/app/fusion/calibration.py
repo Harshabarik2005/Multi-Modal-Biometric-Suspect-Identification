@@ -31,7 +31,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from app.core.logging import get_logger
 from app.core.types import Modality
+
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -77,6 +80,15 @@ class ModalityCalibration:
 def default_calibrations(settings) -> dict[Modality, ModalityCalibration]:
     """Build the calibration set from config."""
     cfg = settings.fusion
+
+    # Anchors belong to a specific checkpoint. Measured on one model they say
+    # nothing about another, so a mismatch is reported here -- at the point
+    # they are turned into a scale -- rather than left to be discovered in a
+    # match score that looks fine (DES-01).
+    mismatch = settings.reid_calibration_mismatch()
+    if mismatch:
+        logger.warning("%s", mismatch)
+
     return {
         Modality.FACE: ModalityCalibration(
             Modality.FACE, cfg.face_impostor, cfg.face_genuine

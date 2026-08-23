@@ -159,6 +159,24 @@ class ReIDSettings(BaseModel):
     # OSNet variant. x1_0 is the accurate default (2.7M params, ~11MB weights);
     # x0_25 is markedly faster if throughput matters.
     model: str = "osnet_x1_0"
+
+    # Which checkpoint to load (DES-01). This branch used to load OSNet's
+    # ImageNet weights -- generic classification features, not a model trained
+    # to tell people apart -- while presenting the result as re-identification.
+    #
+    #   msmt17        re-ID. 4,101 identities, 15 cameras, indoor and outdoor,
+    #                 day and night. The most varied single re-ID dataset, so
+    #                 the best default for footage from cameras it has never
+    #                 seen. osnet_x1_0 only.
+    #   market1501    re-ID, but a single university campus. Higher benchmark
+    #                 numbers, narrower conditions.
+    #   dukemtmcreid  re-ID, outdoor campus.
+    #   multi_source  trained on MSMT17 + DukeMTMC + CUHK03 together, for
+    #                 transfer to unseen cameras. osnet_ibn_x1_0 only.
+    #   imagenet      NOT re-ID. Available for every variant, including the
+    #                 small fast ones, and it will warn loudly on every start.
+    weights: str = "msmt17"
+
     # OSNet's training input size. Do not change without retraining.
     input_height: int = 256
     input_width: int = 128
@@ -201,9 +219,32 @@ class FusionSettings(BaseModel):
     gait_impostor: float = 0.52
     gait_genuine: float = 0.95
 
-    # Re-ID: measured on real crops. Different people 0.755, same person 0.980.
-    reid_impostor: float = 0.755
-    reid_genuine: float = 0.980
+    # Re-ID: re-measured under the msmt17 checkpoint (DES-01). The previous
+    # values -- impostor 0.755, genuine 0.980 -- came from OSNet's ImageNet
+    # weights, which are not a re-ID model at all.
+    #
+    # Both checkpoints, same fixtures, enrolment clip against probe clip:
+    #
+    #                  impostor   genuine   separation
+    #   imagenet         0.765     0.942      0.177
+    #   msmt17           0.726     0.881      0.155
+    #
+    # The impostor drops, which is the expected effect of a model trained to
+    # tell people apart. The genuine score drops too, and by more -- these
+    # fixtures are two crops of the same photograph, so ImageNet's generic
+    # features were partly matching the image rather than the person.
+    #
+    # Still a very small sample: one photograph, two people, no variation in
+    # pose or lighting. Re-derive from the Phase-10 TAR@FAR curve on real
+    # footage before operational use.
+    reid_impostor: float = 0.726
+    reid_genuine: float = 0.881
+
+    # Which checkpoint the two numbers above were measured against. When this
+    # disagrees with reid.weights the calibration does not apply to the model
+    # actually running, and the mismatch is reported rather than left for
+    # someone to notice.
+    reid_anchors_measured_on: str = "msmt17"
 
     # Fused score above which a track is a candidate match. On the calibrated
     # scale, 0.5 means "halfway between a stranger and a genuine match".
@@ -245,15 +286,22 @@ class MatchingSettings(BaseModel):
     # all rather than returning a number.
     gait_threshold: float = Field(0.70, ge=-1.0, le=1.0)
     # Re-ID cosine similarities cluster in a high, narrow band, so face-like
-    # thresholds do not transfer. Measured on real crops: two different people
-    # scored 0.755, the same person across one track scored 0.980. A threshold
-    # of 0.75 would therefore have matched strangers. 0.88 sits between the
-    # two, leaning conservative because a false identification is worse than a
-    # missed one. Calibrate properly with the Phase-10 TAR@FAR curve -- the
-    # same-person figure here comes from one continuous track (identical
-    # clothing, lighting and seconds apart), which is far easier than a real
-    # cross-camera, cross-day match.
-    reid_threshold: float = Field(0.88, ge=-1.0, le=1.0)
+    # thresholds do not transfer.
+    #
+    # This was 0.88, from measurements taken against OSNet's ImageNet weights.
+    # Re-measured under the msmt17 re-ID checkpoint (DES-01), the enrolled
+    # subject scores 0.881 against their own probe clip and 0.726 against the
+    # impostor -- so the old 0.88 sat directly on top of the genuine score and
+    # would have rejected a correct match on a rounding error. A stale
+    # threshold does not announce itself; it just stops finding people.
+    #
+    # 0.80 is the midpoint of the measured pair, leaving similar margin either
+    # side. Still conservative in intent, because a false identification is
+    # worse than a missed one, but no longer conservative past the point of
+    # not working. Calibrate properly with the Phase-10 TAR@FAR curve: both
+    # figures come from a single photograph of two people, which is far easier
+    # than a real cross-camera, cross-day match.
+    reid_threshold: float = Field(0.80, ge=-1.0, le=1.0)
     # Minimum observations before a track is matched at all, so an identity is
     # never asserted off a single frame.
     min_track_observations: int = 5
@@ -385,6 +433,33 @@ class Settings(BaseSettings):
             return "cuda" if torch.cuda.is_available() else "cpu"
         except ImportError:  # torch missing - detection would fail anyway
             return "cpu"
+
+    def reid_calibration_mismatch(self) -> str | None:
+        """Report re-ID anchors that were measured against a different model.
+
+        The impostor and genuine anchors are what put re-ID on a comparable
+        scale with face and gait. They are properties of a specific checkpoint:
+        measured on one model, they say nothing about another. DES-01 found
+        them measured against ImageNet weights, so switching to a re-ID
+        checkpoint -- the right thing to do -- leaves the calibration stale in
+        the opposite direction.
+
+        Returns None when they agree, so callers can treat it as a flag.
+        """
+        measured = self.fusion.reid_anchors_measured_on
+        running = self.reid.weights
+        if measured == running:
+            return None
+        return (
+            f"Re-ID calibration was measured against {measured!r} weights but "
+            f"{running!r} weights are loaded. reid_impostor="
+            f"{self.fusion.reid_impostor} and reid_genuine="
+            f"{self.fusion.reid_genuine} do not describe the model that is "
+            "running, so the calibrated re-ID score and anything derived from "
+            "it -- the fused score, the threshold, the fusion weights -- are "
+            "unreliable. Re-derive them with eval/ and set "
+            "fusion.reid_anchors_measured_on to match."
+        )
 
 
 @lru_cache(maxsize=None)

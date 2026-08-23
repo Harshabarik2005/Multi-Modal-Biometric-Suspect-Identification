@@ -18,7 +18,7 @@ import json
 from datetime import datetime, timezone
 
 import numpy as np
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, func, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -68,6 +68,42 @@ def make_engine(url: str, echo: bool = False) -> Engine:
 
 def create_schema(engine: Engine) -> None:
     Base.metadata.create_all(engine)
+    _add_missing_columns(engine)
+
+
+#: Columns added after a database may already exist in the field. `create_all`
+#: creates missing tables but never alters existing ones, so without this an
+#: upgrade opens a database that loads fine and fails on the first query
+#: touching the new column.
+#:
+#: This is not a migration system. It handles the one case it can handle
+#: safely -- an added, nullable, defaulted column -- and nothing else. Renames,
+#: type changes and backfills need a real tool; this exists so that adding a
+#: field does not silently break every deployment that predates it.
+_ADDED_COLUMNS = {
+    "templates": {"model_id": "VARCHAR(64) DEFAULT ''"},
+    "decision_reviews": {"overturns_previous": "BOOLEAN DEFAULT 0"},
+}
+
+
+def _add_missing_columns(engine: Engine) -> None:
+    from sqlalchemy import inspect, text
+
+    inspector = inspect(engine)
+    existing_tables = set(inspector.get_table_names())
+
+    for table, columns in _ADDED_COLUMNS.items():
+        if table not in existing_tables:
+            continue
+        present = {c["name"] for c in inspector.get_columns(table)}
+        for name, definition in columns.items():
+            if name in present:
+                continue
+            with engine.begin() as connection:
+                connection.execute(
+                    text(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+                )
+            logger.info("Added %s.%s to an existing database", table, name)
 
 
 def session_factory(engine: Engine) -> sessionmaker[Session]:
@@ -163,6 +199,7 @@ class WatchlistRepository:
                     dim=int(np.asarray(embedding.vector).size),
                     quality=float(embedding.quality),
                     frames_used=int(embedding.frames_used),
+                    model_id=embedding.model_id,
                 )
             )
 
@@ -174,6 +211,24 @@ class WatchlistRepository:
         )
         self.session.commit()
         return person
+
+    def templates_without_a_model(self) -> int:
+        """Count templates that do not record which model produced them.
+
+        These predate the model being recorded (DES-01). They are allowed --
+        refusing them would strand every existing watchlist -- but if any of
+        them predate a change to `reid.weights` their similarity scores are
+        meaningless, and nothing about that is visible in a score. The console
+        reports the count so someone can decide whether to re-enrol.
+        """
+        return int(
+            self.session.scalar(
+                select(func.count())
+                .select_from(Template)
+                .where((Template.model_id == "") | (Template.model_id.is_(None)))
+            )
+            or 0
+        )
 
     def get_person(self, person_id: str) -> Person | None:
         return self.session.scalar(
@@ -213,6 +268,7 @@ class WatchlistRepository:
                 vector=self._decode(template.payload),
                 quality=template.quality,
                 frames_used=template.frames_used,
+                model_id=template.model_id or "",
             )
         return PersonRecord(
             person_id=person.person_id,

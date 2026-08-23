@@ -265,6 +265,16 @@ class GaitEmbedder(EmbeddingBranch):
         self._extractor = extractor
 
     @property
+    def model_id(self) -> str:
+        # The GEI descriptor is not learned weights, but its geometry is what
+        # defines the space: change the descriptor grid and old vectors are a
+        # different length and a different meaning.
+        return (
+            f"gei/{self.cfg.descriptor_height}x{self.cfg.descriptor_width}"
+            f"@{self.cfg.silhouette_height}x{self.cfg.silhouette_width}"
+        )
+
+    @property
     def extractor(self) -> SilhouetteExtractor:
         """Segmentation model, loaded on first use rather than at construction.
 
@@ -367,6 +377,7 @@ class GaitEmbedder(EmbeddingBranch):
 
         return ModalityEmbedding(
             modality=self.modality,
+            model_id=self.model_id,
             vector=self.encoder.encode(gei),
             quality=quality,
             frames_used=len(silhouettes),

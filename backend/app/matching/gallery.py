@@ -52,6 +52,28 @@ TEMPLATE_KEY_ENV = "FRS_TEMPLATE_ENCRYPTION_KEY"
 ALLOW_PLAINTEXT_ENV = "FRS_ALLOW_PLAINTEXT_TEMPLATES"
 
 
+def model_mismatch(
+    probe: ModalityEmbedding, reference: ModalityEmbedding
+) -> str | None:
+    """Report a probe and reference that came from different models (DES-01).
+
+    Returns None when they are comparable -- including when either side does
+    not know what produced it, which is every template enrolled before the
+    model was recorded. Refusing those would strand existing watchlists, and
+    the honest position is that they are unverified rather than known-wrong.
+    A deployment that re-enrols gets the check; one that does not is no worse
+    off than before.
+    """
+    if not probe.model_id or not reference.model_id:
+        return None
+    if probe.model_id == reference.model_id:
+        return None
+    return (
+        f"enrolled with {reference.model_id}, probe from {probe.model_id} -- "
+        "different models, so their similarity is meaningless. Re-enrol."
+    )
+
+
 def plaintext_is_permitted() -> bool:
     return os.environ.get(ALLOW_PLAINTEXT_ENV, "").strip().lower() in {
         "1",
@@ -147,6 +169,10 @@ class ModalityScore:
     modality: Modality
     similarity: float | None  # None = this modality could not compare at all
     probe_quality: float
+    #: Why, when `similarity` is None. Surfaced in the explainability view so
+    #: "no face was visible" and "the stored reference is from a different
+    #: model" are distinguishable, which they are not from a bare None.
+    incomparable_reason: str = ""
 
 
 @dataclass
@@ -340,8 +366,16 @@ class Gallery:
             candidate = MatchCandidate(person=person)
             for modality, probe in probes.items():
                 reference = person.embedding(modality)
+                reason = ""
                 if reference is None or not probe.has_signal:
                     similarity = None
+                elif (mismatch := model_mismatch(probe, reference)) is not None:
+                    # Refuse rather than score. Cosine similarity between two
+                    # different embedding spaces is noise shaped like a number,
+                    # and this system's whole discipline is that "could not
+                    # compare" must never collapse into "compared and got a
+                    # low score" (DES-01).
+                    similarity, reason = None, mismatch
                 elif modality is Modality.GAIT:
                     similarity = self._gait_similarity(probe, reference, gait_mean)
                 else:
@@ -351,6 +385,7 @@ class Gallery:
                     modality=modality,
                     similarity=similarity,
                     probe_quality=probe.quality,
+                    incomparable_reason=reason,
                 )
 
             if strategy is not None:
@@ -414,11 +449,21 @@ class Gallery:
 
         candidates: list[MatchCandidate] = []
         for person in self._people.values():
-            references = {
-                m: person.embeddings[m].vector
+            # Drop any modality whose stored reference came from a different
+            # model. Here it matters more than in rank(): the head fuses
+            # embeddings into one vector before comparing, so a single
+            # mismatched modality contaminates the fused representation rather
+            # than just contributing one bad per-modality score (DES-01).
+            usable = [
+                m
                 for m in person.modalities
                 if m in model.dims
-            }
+                and (
+                    m not in probes
+                    or model_mismatch(probes[m], person.embeddings[m]) is None
+                )
+            ]
+            references = {m: person.embeddings[m].vector for m in usable}
             if not references:
                 continue
             reference_vector, _ = model.fuse_one(
@@ -526,6 +571,9 @@ class GalleryStore:
                 "frames_used": embedding.frames_used,
                 "dim": int(np.asarray(embedding.vector).size),
                 "detail": {k: float(v) for k, v in embedding.detail.items()},
+                # Which model produced it. A reference is only comparable to a
+                # probe from the same one (DES-01).
+                "model_id": embedding.model_id,
             }
 
         if not vectors:
@@ -581,6 +629,7 @@ class GalleryStore:
                 quality=float(info.get("quality", 0.0)),
                 frames_used=int(info.get("frames_used", 0)),
                 detail={k: float(v) for k, v in (info.get("detail") or {}).items()},
+                model_id=str(info.get("model_id", "")),
             )
 
         return PersonRecord(

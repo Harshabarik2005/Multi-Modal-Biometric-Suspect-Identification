@@ -140,7 +140,7 @@ step cycles. Enroll from footage of the person walking if you want both, and
 
 **Scores are fused and calibrated.** The three modalities produce
 similarities on completely different scales — two different people score 0.03
-by face but 0.755 by re-ID — so each is mapped onto a common 0–1 scale before
+by face but 0.755 by re-ID (measured against ImageNet weights; see below) — so each is mapped onto a common 0–1 scale before
 being combined, where 0 means "indistinguishable from a stranger" and 1 means
 "as good as a genuine match gets". One threshold (`fusion.threshold`, default
 0.55) then applies to every modality alike.
@@ -159,6 +159,45 @@ whether a hit was driven by a clear face or mostly by a jacket.
 **Re-ID references go stale.** Re-ID encodes clothing as much as the person, so
 its stored reference decays with a 3-day half-life (`reid.trust_half_life_days`).
 Re-enroll if you need it current.
+
+**The re-ID anchors are provisional, and the console says so.** The appearance
+branch originally loaded OSNet's *ImageNet* checkpoint — generic classification
+features presented as re-identification. Two strangers scoring 0.755 is exactly
+what that produces; a model trained to separate identities pushes impostors far
+lower. The default is now a checkpoint trained for re-ID on MSMT17
+(`reid.weights`), but every number measured against the old one —
+`reid_impostor`, `reid_genuine`, `reid_threshold`, and the fusion weights
+derived from them — still describes the wrong model.
+
+Re-measured under the new checkpoint on the same fixtures:
+
+| checkpoint | impostor | genuine | separation |
+|---|---|---|---|
+| `imagenet` | 0.765 | 0.942 | 0.177 |
+| `msmt17` | 0.726 | 0.881 | 0.155 |
+
+The impostor drops, which is what a model trained to tell people apart should
+do. The genuine score drops further — the fixtures are two crops of one
+photograph, so ImageNet's generic features were partly matching the *image*
+rather than the person. The old `reid_threshold: 0.88` then sat directly on top
+of the genuine score of 0.881 and would have rejected a correct match on a
+rounding error; it is now 0.80, the midpoint of the measured pair.
+
+This is still one photograph of two people. Re-derive from your own footage with
+the Phase-10 TAR@FAR curve before operational use, and set
+`fusion.reid_anchors_measured_on` to whatever you measured against — when it
+disagrees with `reid.weights`, `/api/stats` reports it and the console shows it
+above the review queue, so nobody confirms an identification without knowing the
+score is uncalibrated.
+
+**Changing `reid.weights` invalidates everyone already enrolled.** A stored
+template is only comparable to a probe from the same model: the vectors still
+load, still have the right length, and still produce a cosine similarity — one
+that means nothing. Every template now records which model produced it, and a
+cross-model pair is reported as "could not compare" rather than scored. Anything
+enrolled before that record existed is allowed but flagged on `/api/stats`,
+because stranding an existing watchlist would be worse than saying it is
+unverified. **If you change the checkpoint, re-enrol.**
 
 ### Encrypting stored templates
 

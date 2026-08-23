@@ -157,11 +157,16 @@ class FaceEmbedder(PerFrameBranch):
 
         return ModalityEmbedding(
             modality=self.modality,
+            model_id=self.model_id,
             vector=np.asarray(embedding, dtype=np.float32),
             quality=quality,
             frames_used=1,
             detail=detail,
         )
+
+    @property
+    def model_id(self) -> str:
+        return f"insightface/{self.cfg.model_pack}"
 
     def detect(self, image: np.ndarray) -> list[Any]:
         """Run InsightFace on a BGR image. Returns [] when nothing is found."""

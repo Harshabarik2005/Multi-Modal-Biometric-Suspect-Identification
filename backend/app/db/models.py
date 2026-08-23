@@ -112,6 +112,16 @@ class Template(Base):
     dim: Mapped[int] = mapped_column(Integer)
     quality: Mapped[float] = mapped_column(Float, default=0.0)
     frames_used: Mapped[int] = mapped_column(Integer, default=0)
+
+    #: Which model produced this vector, e.g. "osnet_x1_0/msmt17".
+    #:
+    #: A stored reference is only comparable to a probe from the same model.
+    #: Change the checkpoint and every template here still loads, still has
+    #: the right length, and still yields a cosine similarity -- one that
+    #: means nothing, because the two vectors live in unrelated spaces
+    #: (DES-01). Empty on rows enrolled before this column existed, which is
+    #: treated as unknown rather than as agreement.
+    model_id: Mapped[str] = mapped_column(String(64), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     person: Mapped[Person] = relationship(back_populates="templates")

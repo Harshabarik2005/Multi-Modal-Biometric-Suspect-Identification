@@ -116,8 +116,22 @@ gait:
 # --- Phase 4: re-ID branch -------------------------------------------------
 reid:
   # osnet_x1_0 is 2.7M params, ~11MB of weights, downloaded on first use.
-  # osnet_x0_25 is much faster if throughput matters more than accuracy.
+  # osnet_x0_25 is much faster if throughput matters more than accuracy --
+  # but only ImageNet weights exist for it, so see the warning below.
   model: osnet_x1_0
+
+  # Which checkpoint (DES-01). This branch used to load OSNet's ImageNet
+  # weights and present generic classification features as re-identification.
+  #   msmt17        re-ID. 4,101 identities, 15 cameras, indoor and outdoor,
+  #                 day and night -- the most varied single re-ID dataset, so
+  #                 the best default for cameras it has never seen.
+  #   market1501    re-ID, one campus. Better benchmarks, narrower conditions.
+  #   dukemtmcreid  re-ID, outdoor campus.
+  #   multi_source  MSMT17 + DukeMTMC + CUHK03 together, trained to transfer
+  #                 to unseen cameras. Requires model: osnet_ibn_x1_0.
+  #   imagenet      NOT re-ID. Warns loudly on every start. Available for the
+  #                 small fast variants, which have nothing else published.
+  weights: msmt17
   # OSNet's training input size. Changing this without retraining breaks it.
   input_height: 256
   input_width: 128
@@ -149,8 +163,20 @@ fusion:
   face_genuine: 0.95       # same person, measured
   gait_impostor: 0.52      # different walking styles, centred, synthetic
   gait_genuine: 0.95
-  reid_impostor: 0.755     # different people, measured
-  reid_genuine: 0.980      # same person, measured
+  # Re-measured under the msmt17 checkpoint (DES-01). Previously 0.755/0.980,
+  # measured against OSNet's ImageNet weights, which are not a re-ID model.
+  # Enrolment clip vs probe clip, same fixtures, both checkpoints:
+  #                impostor   genuine   separation
+  #   imagenet       0.765     0.942      0.177
+  #   msmt17         0.726     0.881      0.155
+  # One photograph, two people, no variation in pose or lighting -- re-derive
+  # from the Phase-10 TAR@FAR curve on real footage before operational use.
+  reid_impostor: 0.726
+  reid_genuine: 0.881
+  # Which checkpoint the two numbers above were measured against. When this
+  # disagrees with reid.weights, the console shows the mismatch to whoever is
+  # reviewing a match rather than leaving it in a log.
+  reid_anchors_measured_on: msmt17
 
   # On the calibrated scale 0.5 means "halfway between a stranger and a
   # genuine match".
@@ -180,9 +206,12 @@ matching:
   # uncentred gait refuses to compare rather than returning a number.
   gait_threshold: 0.70
   # Re-ID similarities cluster high and narrow, so face thresholds do not
-  # transfer. Measured on real crops: different people 0.755, same person
-  # 0.980 -- a 0.75 threshold would have matched strangers.
-  reid_threshold: 0.88
+  # transfer. Was 0.88, from ImageNet-weight measurements. Under the msmt17
+  # checkpoint the enrolled subject scores 0.881 against their own probe and
+  # 0.726 against the impostor, so 0.88 sat on top of the genuine score and
+  # would have rejected a correct match on a rounding error. 0.80 is the
+  # midpoint, with similar margin either side.
+  reid_threshold: 0.80
   min_track_observations: 5
   rematch_every: 15
   # Embedding all 64 buffered crops made the face branch 70% of runtime at

@@ -131,6 +131,16 @@ class ModalityEmbedding:
     # Free-form per-branch detail, surfaced in the explainability view:
     # face stores yaw/pitch, gait stores cycles detected, etc.
     detail: dict[str, float] = field(default_factory=dict)
+    # Which model produced this vector, e.g. "osnet_x1_0/msmt17".
+    #
+    # An embedding is only meaningful inside the space its model defines.
+    # Cosine similarity between vectors from two different models is not a
+    # weak signal, it is noise -- and it is noise that looks exactly like a
+    # score. Recording the model is what lets a stored reference and a live
+    # probe be checked for having come from the same one (DES-01). Empty
+    # means unknown, which is the case for anything enrolled before this
+    # existed.
+    model_id: str = ""
 
     @property
     def has_signal(self) -> bool:
