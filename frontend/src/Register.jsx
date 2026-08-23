@@ -369,7 +369,9 @@ function CaptureSection({ section, index, state, setState, onError, busy }) {
               <Recorder
                 prompt={section.video.instruction}
                 disabled={busy}
-                onRecorded={(file) => addFiles(angles[0].id, [file])}
+                allowVideo
+                allowPhoto={!section.videoOnly}
+                onCapture={(file) => addFiles(angles[0].id, [file])}
               />
             </div>
           </div>
@@ -420,6 +422,20 @@ function CaptureSection({ section, index, state, setState, onError, busy }) {
                   disabled={busy}
                   onRemove={(position) => removeFile(angle.id, position)}
                 />
+
+                {/* Photo mode had no camera at all, so anyone without files
+                    already on disk could not use this tab. Video capture is
+                    off here: a recording does not belong in a slot labelled
+                    "Looking straight at the camera". */}
+                <div style={{ marginTop: 10 }}>
+                  <Recorder
+                    prompt={`Line up the shot — ${angle.label.toLowerCase()} — then take it.`}
+                    disabled={busy}
+                    allowVideo={false}
+                    allowPhoto
+                    onCapture={(file) => addFiles(angle.id, [file])}
+                  />
+                </div>
               </div>
             ))}
           </div>

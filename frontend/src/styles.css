@@ -704,13 +704,54 @@ label.checkbox input {
   transition: width 0.35s ease;
 }
 
+/* --- camera ---------------------------------------------------------------- */
+
+.recorder { margin-top: 4px; }
+.recorder-stage { position: relative; display: block; }
+.recorder-prompt { margin: 8px 0 10px; }
+
 .preview-video {
+  display: block;
   width: 100%;
-  max-height: 300px;
+  height: 300px;
   border-radius: var(--radius);
+  border: 1px solid var(--line-2);
   background: #000;
   object-fit: contain;
-  margin-top: 10px;
+}
+
+/* The only red in the console, and it earns it: a recording indicator that
+   relies on shape alone is the one thing somebody can miss while a camera is
+   pointed at them. The dot also pulses, so it does not depend on colour. */
+.rec-badge {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  background: rgba(0, 0, 0, 0.72);
+  color: #fff;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-variant-numeric: tabular-nums;
+}
+.rec-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #e5484d;
+  animation: rec-pulse 1.4s ease-in-out infinite;
+}
+@keyframes rec-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.25; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .rec-dot { animation: none; }
 }
 
 /* --- empty states --------------------------------------------------------- */
