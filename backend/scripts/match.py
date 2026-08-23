@@ -60,6 +60,10 @@ class TrackVerdict:
     # track after the clip, rather than one per re-match during it (LOG-10).
     best_weights: dict = field(default_factory=dict)
     best_calibrated: dict = field(default_factory=dict)
+    # The rule that actually ran. quality_weighted falls back to a plain
+    # average when every modality scored zero quality, so the strategy that
+    # was asked for is not always the one applied (LOG-12).
+    best_strategy: str = ""
     # Every above-threshold hit, for the audit log section 8 requires.
     hits: list[tuple[int, str, float]] = field(default_factory=list)
 
@@ -67,7 +71,7 @@ class TrackVerdict:
 def record_verdicts(
     repo,
     verdicts: dict[int, TrackVerdict],
-    strategy_name: str,
+    fallback_strategy: str,
     camera_id: str = "",
 ) -> int:
     """Write one PENDING decision per matched track. Returns how many.
@@ -81,6 +85,10 @@ def record_verdicts(
 
     PENDING, always. Nothing downstream may act on one until a human reviews
     it, and that is enforced by the schema rather than by this script.
+
+    `fallback_strategy` is only used for a verdict that recorded no fusion
+    result; otherwise the rule that actually ran is taken from the result
+    itself (LOG-12).
     """
     recorded = 0
     for verdict in sorted(
@@ -92,7 +100,7 @@ def record_verdicts(
             verdict.best_person_id,
             track_id=verdict.track_id,
             score=verdict.best_similarity,
-            strategy=strategy_name,
+            strategy=verdict.best_strategy or fallback_strategy,
             weights=verdict.best_weights,
             calibrated=verdict.best_calibrated,
             camera_id=camera_id,
@@ -326,6 +334,9 @@ def run(args: argparse.Namespace) -> int:
                 verdict.best_weights = dict(best.weights)
                 verdict.best_calibrated = (
                     dict(best.fusion.calibrated) if best.fusion else {}
+                )
+                verdict.best_strategy = (
+                    best.fusion.strategy if best.fusion else strategy.name
                 )
 
             if best.fused_similarity >= settings.fusion.threshold:

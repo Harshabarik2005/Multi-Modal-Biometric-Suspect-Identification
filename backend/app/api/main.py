@@ -90,6 +90,13 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None) -
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         logger.info("%s API starting", settings.project_name)
+        # Uploads left by a process that did not stop cleanly. The runner
+        # handles cancelled and never-started jobs, but nothing in-process
+        # survives a kill -9, and these directories hold footage of real
+        # people (SEC-11).
+        from app.api.ingest import sweep_stale_uploads
+
+        sweep_stale_uploads()
         yield
         runner.shutdown()
         engine.dispose()

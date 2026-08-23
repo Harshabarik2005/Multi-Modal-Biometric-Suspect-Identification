@@ -568,3 +568,95 @@ class TestEmbeddingsCarryTheirModel:
 
         warnings = client.get("/api/stats").json()["warnings"]
         assert any("do not record which model" in w for w in warnings)
+
+
+class TestUploadedFootageIsAlwaysDeleted:
+    """SEC-11: the delete lived in the job body's own `finally`.
+
+    A job that is cancelled at shutdown, or still queued when the process
+    stops, never enters that `finally` -- so a temp directory of somebody's
+    biometric footage survived with nothing tracking it.
+    """
+
+    def test_cleanup_runs_for_a_job_that_never_starts(self, tmp_path) -> None:
+        import threading
+
+        from app.api.jobs import JobRunner
+
+        started = threading.Event()
+        release = threading.Event()
+        cleaned: list[str] = []
+
+        runner = JobRunner(max_workers=1)
+        try:
+            # Occupy the single worker so the second job stays queued.
+            runner.submit(
+                "block",
+                lambda job: (started.set(), release.wait(5)),
+                cleanup=lambda: cleaned.append("first"),
+            )
+            assert started.wait(5)
+
+            runner.submit(
+                "queued",
+                lambda job: cleaned.append("this should never run"),
+                cleanup=lambda: cleaned.append("second"),
+            )
+        finally:
+            release.set()
+            runner.shutdown()
+
+        assert "second" in cleaned, "the queued job's upload was left on disk"
+        assert "this should never run" not in cleaned
+
+    def test_cleanup_runs_once_not_twice(self) -> None:
+        from app.api.jobs import JobRunner
+
+        calls = []
+        runner = JobRunner(max_workers=1)
+        runner.submit("work", lambda job: None, cleanup=lambda: calls.append(1))
+        runner.shutdown()
+        assert calls == [1]
+
+    def test_cleanup_still_runs_when_the_job_fails(self) -> None:
+        from app.api.jobs import JobRunner
+
+        calls = []
+
+        def explode(job):
+            raise RuntimeError("boom")
+
+        runner = JobRunner(max_workers=1)
+        runner.submit("work", explode, cleanup=lambda: calls.append(1))
+        runner.shutdown()
+        assert calls == [1]
+
+    def test_the_startup_sweep_removes_orphans(self, monkeypatch, tmp_path) -> None:
+        """Nothing in-process survives a kill -9, so old dirs are swept."""
+        import tempfile
+        import time
+
+        from app.api.ingest import UPLOAD_PREFIX, sweep_stale_uploads
+
+        monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+
+        old = tmp_path / f"{UPLOAD_PREFIX}orphan"
+        old.mkdir()
+        (old / "footage.mp4").write_bytes(b"personal data")
+        import os
+
+        long_ago = time.time() - 24 * 3600
+        os.utime(old, (long_ago, long_ago))
+
+        # A directory a live request may be writing into right now.
+        fresh = tmp_path / f"{UPLOAD_PREFIX}inflight"
+        fresh.mkdir()
+
+        # And something that is not ours at all.
+        other = tmp_path / "someone-elses-tempdir"
+        other.mkdir()
+
+        assert sweep_stale_uploads(older_than_hours=6.0) == 1
+        assert not old.exists()
+        assert fresh.exists(), "deleting an in-flight upload would break a request"
+        assert other.exists()

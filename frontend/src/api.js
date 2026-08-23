@@ -45,7 +45,7 @@ async function request(path, options = {}) {
   if (response.status === 401) {
     clearToken()
     onUnauthorized?.()
-    throw new Error('Your session has ended. Sign in again.')
+    throw httpError('Your session has ended. Sign in again.', 401)
   }
 
   if (!response.ok) {
@@ -61,9 +61,21 @@ async function request(path, options = {}) {
     } catch {
       // Response had no JSON body; the status line is all we have.
     }
-    throw new Error(detail)
+    throw httpError(detail, response.status)
   }
   return response.json()
+}
+
+/**
+ * An Error that remembers its HTTP status.
+ *
+ * Callers that retry need to distinguish "the server hiccuped" from "you are
+ * signed out" -- retrying the second is pointless and hides the real problem.
+ */
+function httpError(message, status) {
+  const error = new Error(message)
+  error.status = status
+  return error
 }
 
 export const api = {
@@ -165,7 +177,7 @@ async function upload(path, { files = [], fields = {} }) {
   if (response.status === 401) {
     clearToken()
     onUnauthorized?.()
-    throw new Error('Your session has ended. Sign in again.')
+    throw httpError('Your session has ended. Sign in again.', 401)
   }
   if (!response.ok) {
     let detail = `${response.status} ${response.statusText}`
@@ -180,7 +192,7 @@ async function upload(path, { files = [], fields = {} }) {
     } catch {
       // No JSON body; the status line is all there is.
     }
-    throw new Error(detail)
+    throw httpError(detail, response.status)
   }
   return response.json()
 }
@@ -191,14 +203,62 @@ async function upload(path, { files = [], fields = {} }) {
  * Enrolment and scanning run three models over every frame and take minutes,
  * so they cannot happen inside a request. `onProgress` is called with each
  * update so the UI can show what stage it has reached.
+ *
+ * Bounded, deliberately. This was an unbounded `for(;;)`: restart the server
+ * mid-scan and the job is gone, every poll 404s, and the browser sits on
+ * "scanning..." forever with no way to tell the difference between slow and
+ * dead (DES-03). It also tolerates a few consecutive failures first, because
+ * one dropped request during a minutes-long job is not a reason to give up.
  */
-export async function waitForJob(jobId, onProgress, intervalMs = 1000) {
+export const JOB_TIMEOUT_MS = 30 * 60 * 1000
+const MAX_CONSECUTIVE_ERRORS = 5
+
+export async function waitForJob(
+  jobId,
+  onProgress,
+  intervalMs = 1000,
+  timeoutMs = JOB_TIMEOUT_MS,
+) {
+  const deadline = Date.now() + timeoutMs
+  let consecutiveErrors = 0
+
   for (;;) {
-    const job = await api.job(jobId)
+    let job
+    try {
+      job = await api.job(jobId)
+      consecutiveErrors = 0
+    } catch (error) {
+      // A 401 means the session ended; retrying cannot fix that, and the
+      // caller has already been dropped back to sign-in.
+      if (error.status === 401) throw error
+
+      consecutiveErrors += 1
+      if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+        throw new Error(
+          `Lost contact with the server while the job was running (${error.message}). ` +
+            'It may have restarted. Check the results before re-running — ' +
+            'the work may have completed.',
+        )
+      }
+      await sleep(intervalMs)
+      continue
+    }
+
     onProgress?.(job)
     if (job.status === 'succeeded' || job.status === 'failed') return job
-    await new Promise((resolve) => setTimeout(resolve, intervalMs))
+
+    if (Date.now() > deadline) {
+      throw new Error(
+        `The job did not finish within ${Math.round(timeoutMs / 60000)} minutes. ` +
+          'It may still be running on the server — check before starting again.',
+      )
+    }
+    await sleep(intervalMs)
   }
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 /** Display metadata per modality. Colours are reused by the weight bars. */

@@ -76,11 +76,25 @@ class JobRunner:
         )
         self._jobs: OrderedDict[str, Job] = OrderedDict()
         self._futures: dict[str, Future] = {}
+        #: Per-job cleanup, run once whether or not the job ever ran.
+        self._cleanups: dict[str, Callable[[], None]] = {}
         self._lock = threading.Lock()
         self._history = history
 
-    def submit(self, kind: str, work: Callable[[Job], Any]) -> Job:
-        """Queue `work`, which receives its own `Job` so it can report progress."""
+    def submit(
+        self,
+        kind: str,
+        work: Callable[[Job], Any],
+        cleanup: Callable[[], None] | None = None,
+    ) -> Job:
+        """Queue `work`, which receives its own `Job` so it can report progress.
+
+        `cleanup` runs exactly once, whether or not `work` ever does. Uploaded
+        footage used to be deleted in the work function's own `finally`, which
+        never runs for a job that is cancelled at shutdown or is still queued
+        when the process stops -- leaving a temp directory of someone's
+        biometric footage on disk with nothing tracking it (SEC-11).
+        """
         job = Job(
             id=uuid.uuid4().hex[:12],
             kind=kind,
@@ -112,9 +126,25 @@ class JobRunner:
                 job.finished_at = datetime.now(timezone.utc).isoformat(
                     timespec="seconds"
                 )
+                self._clean(job.id)
+
+        if cleanup is not None:
+            with self._lock:
+                self._cleanups[job.id] = cleanup
 
         self._futures[job.id] = self._executor.submit(run)
         return job
+
+    def _clean(self, job_id: str) -> None:
+        """Run a job's cleanup, at most once, whoever gets there first."""
+        with self._lock:
+            cleanup = self._cleanups.pop(job_id, None)
+        if cleanup is None:
+            return
+        try:
+            cleanup()
+        except Exception:  # noqa: BLE001 - cleanup failing must not propagate
+            logger.exception("Cleanup for job %s failed", job_id)
 
     def get(self, job_id: str) -> Job | None:
         with self._lock:
@@ -138,12 +168,19 @@ class JobRunner:
                 if job.status in (JobStatus.SUCCEEDED, JobStatus.FAILED):
                     self._jobs.pop(job_id, None)
                     self._futures.pop(job_id, None)
+                    self._cleanups.pop(job_id, None)
                     break
             else:
                 return  # nothing finished to evict
 
     def shutdown(self) -> None:
         self._executor.shutdown(wait=False, cancel_futures=True)
+        # Cancelled and never-started jobs never reach their own `finally`, so
+        # their uploads would be left behind (SEC-11).
+        with self._lock:
+            pending = list(self._cleanups)
+        for job_id in pending:
+            self._clean(job_id)
 
 
 @dataclass

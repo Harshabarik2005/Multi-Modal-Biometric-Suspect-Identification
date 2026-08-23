@@ -146,7 +146,14 @@ def scan_video(
                     if best.fusion
                     else {}
                 ),
-                "strategy": strategy.name,
+                # The rule that actually ran, not the one that was asked for.
+                # quality_weighted falls back to a plain average when every
+                # modality scored zero quality, and recording the outer name
+                # would put a rule in the audit trail that was never applied
+                # (LOG-12).
+                "strategy": (
+                    best.fusion.strategy if best.fusion else strategy.name
+                ),
                 # Modalities that had a signal but could not be compared --
                 # almost always a reference enrolled with a different model
                 # (DES-01). Without this the reviewer sees a face-only match

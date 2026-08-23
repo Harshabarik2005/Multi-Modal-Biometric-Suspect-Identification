@@ -105,6 +105,75 @@ class JobOut(BaseModel):
 
 # -- upload handling -------------------------------------------------------
 
+#: Prefix for staged uploads, so an ungraceful stop can be swept up on the
+#: next start. Nothing else may use it.
+UPLOAD_PREFIX = "frs-upload-"
+
+
+def _remover(directory: Path):
+    """A cleanup callable that deletes a staged upload directory."""
+
+    def remove() -> None:
+        shutil.rmtree(directory, ignore_errors=True)
+
+    return remove
+
+
+def sweep_stale_uploads(older_than_hours: float = 6.0) -> int:
+    """Delete staged uploads left behind by a process that did not stop
+    cleanly. Returns how many were removed.
+
+    The runner deletes uploads for jobs that are cancelled or never run, but
+    nothing in-process survives a kill -9 or a power loss. These directories
+    hold footage of real people, so leaving them to accumulate silently is not
+    acceptable; this runs at startup.
+
+    The age bound matters: a second worker may be mid-upload into a directory
+    of its own right now, and deleting that would break a live request.
+    """
+    import time
+
+    root = Path(tempfile.gettempdir())
+    cutoff = time.time() - older_than_hours * 3600
+    removed = 0
+
+    for directory in root.glob(f"{UPLOAD_PREFIX}*"):
+        if not directory.is_dir():
+            continue
+        try:
+            if directory.stat().st_mtime > cutoff:
+                continue
+        except OSError:
+            continue
+        shutil.rmtree(directory, ignore_errors=True)
+        removed += 1
+
+    if removed:
+        logger.warning(
+            "Removed %d staged upload directory/ies left by a previous run. "
+            "They held footage that should not have outlived the job.",
+            removed,
+        )
+    return removed
+
+
+def _unique_path(directory: Path, name: str) -> Path:
+    """A path in `directory` for `name` that does not collide with an earlier
+    upload. Suffixes with -1, -2, ... rather than overwriting."""
+    candidate = directory / name
+    if not candidate.exists():
+        return candidate
+
+    stem, suffix = candidate.stem, candidate.suffix
+    for index in range(1, 10_000):
+        candidate = directory / f"{stem}-{index}{suffix}"
+        if not candidate.exists():
+            return candidate
+    raise HTTPException(
+        status.HTTP_400_BAD_REQUEST, f"Too many uploads named {name!r}."
+    )
+
+
 async def _stage(files: list[UploadFile]) -> tuple[Path, list[Path]]:
     """Write uploads to a temp directory. Caller must delete it."""
     if not files:
@@ -115,7 +184,7 @@ async def _stage(files: list[UploadFile]) -> tuple[Path, list[Path]]:
             f"Too many files ({len(files)}); the limit is {MAX_FILES}.",
         )
 
-    directory = Path(tempfile.mkdtemp(prefix="frs-upload-"))
+    directory = Path(tempfile.mkdtemp(prefix=UPLOAD_PREFIX))
     saved: list[Path] = []
     total = 0
 
@@ -129,7 +198,13 @@ async def _stage(files: list[UploadFile]) -> tuple[Path, list[Path]]:
                     "(jpg/png) or video (mp4/mov/avi/mkv).",
                 )
 
-            destination = directory / name
+            # Two files can legitimately arrive with the same name -- phone
+            # cameras produce IMG_0001.jpg endlessly, and browsers do not
+            # rename on multi-select. Writing both to the same path silently
+            # destroyed one and processed the survivor twice, so an enrolment
+            # reported the right number of files while weighting one of them
+            # double (LOG-14).
+            destination = _unique_path(directory, name)
             with destination.open("wb") as handle:
                 while chunk := await upload.read(1024 * 1024):
                     total += len(chunk)
@@ -320,11 +395,14 @@ async def enroll(
             }
         finally:
             session.close()
-            # Enrolment footage is personal data. The embeddings are extracted;
-            # keeping the source creates a second copy to protect for nothing.
-            shutil.rmtree(directory, ignore_errors=True)
 
-    return JobOut(**runner.submit("enroll", work).to_dict())
+    # Enrolment footage is personal data. The embeddings are extracted; keeping
+    # the source creates a second copy to protect for nothing. Handed to the
+    # runner rather than done in `work`'s own `finally`, so it still happens
+    # for a job that is cancelled at shutdown or never starts (SEC-11).
+    return JobOut(
+        **runner.submit("enroll", work, cleanup=_remover(directory)).to_dict()
+    )
 
 
 # -- scanning --------------------------------------------------------------
@@ -407,9 +485,10 @@ async def scan(
             }
         finally:
             session.close()
-            shutil.rmtree(directory, ignore_errors=True)
 
-    return JobOut(**runner.submit("scan", work).to_dict())
+    return JobOut(
+        **runner.submit("scan", work, cleanup=_remover(directory)).to_dict()
+    )
 
 
 # -- job status ------------------------------------------------------------

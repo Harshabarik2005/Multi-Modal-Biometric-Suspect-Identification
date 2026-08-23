@@ -330,3 +330,49 @@ class TestGalleryFusionIntegration:
             )
             for candidate in ranked:
                 assert 0.0 <= candidate.fused_similarity <= 1.0
+
+
+class TestTheAuditRecordsTheRuleThatRan:
+    """LOG-12: a fallback recorded the strategy that was asked for.
+
+    QualityWeightedFusion falls back to a plain average when every modality
+    scored zero quality. The audit trail recorded "quality_weighted" anyway, so
+    it named a rule that was never applied -- in the one record a reviewer has
+    for reconstructing how a decision was reached.
+    """
+
+    def test_the_fallback_names_itself(self) -> None:
+        from app.core.types import Modality
+        from app.fusion.baseline import FusionInput, QualityWeightedFusion
+        from app.fusion.calibration import ModalityCalibration
+
+        calibrations = {
+            Modality.FACE: ModalityCalibration(Modality.FACE, 0.03, 0.95),
+            Modality.REID: ModalityCalibration(Modality.REID, 0.726, 0.881),
+        }
+        strategy = QualityWeightedFusion(calibrations)
+
+        # Every modality at zero quality: the weighting has nothing to work
+        # with and an equal-weight average is used instead.
+        result = strategy.fuse(
+            [
+                FusionInput(modality=Modality.FACE, similarity=0.9, quality=0.0),
+                FusionInput(modality=Modality.REID, similarity=0.8, quality=0.0),
+            ]
+        )
+        assert result.strategy == "average", (
+            "the record would claim a rule that never ran"
+        )
+
+    def test_the_normal_path_still_names_itself(self) -> None:
+        from app.core.types import Modality
+        from app.fusion.baseline import FusionInput, QualityWeightedFusion
+        from app.fusion.calibration import ModalityCalibration
+
+        strategy = QualityWeightedFusion(
+            {Modality.FACE: ModalityCalibration(Modality.FACE, 0.03, 0.95)}
+        )
+        result = strategy.fuse(
+            [FusionInput(modality=Modality.FACE, similarity=0.9, quality=0.8)]
+        )
+        assert result.strategy == "quality_weighted"

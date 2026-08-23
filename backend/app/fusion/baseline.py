@@ -206,6 +206,11 @@ class QualityWeightedFusion(FusionStrategy):
             # Every available modality scored zero quality. Fall back to an
             # equal-weight average rather than dividing by zero -- the
             # similarities are still real, we just have no basis to rank them.
+            #
+            # The result keeps AverageFusion's own name, so the audit record
+            # says what actually happened. Callers must read the name off the
+            # FusionResult rather than off the strategy they called, or the
+            # trail claims a rule that was never applied (LOG-12).
             return AverageFusion(self.calibrations).fuse(inputs)
 
         weights = {m: w / total for m, w in raw_weights.items()}
