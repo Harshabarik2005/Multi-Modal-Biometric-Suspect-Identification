@@ -8,58 +8,72 @@ import Recorder from './Recorder'
  * Footage is collected section by section rather than as one pile of files,
  * because the three signals want genuinely different recordings and the
  * difference is not guessable. Somebody who uploads five excellent portraits
- * has enrolled a good face profile and *no gait profile at all* — a still
+ * has registered a good face profile and *no gait profile at all* — a still
  * image contains no gait — and a single "add files" box gives them no way to
  * discover that until it is too late to re-record.
  *
- * Each section carries its own angle slots, because one view of a face is a
- * much weaker reference than three, and the interface should ask for the
- * second and third rather than accept the first and call it done.
+ * Each section offers the same choice two ways round:
  *
- * All the files are sent together: the backend runs every branch over every
- * observation, so the sections are about eliciting the right footage, not
- * about routing it. What each section does buy is *specific* feedback — check
- * a gait section and you learn whether that walk actually produced gait,
- * rather than whether the upload as a whole did.
+ *   **One video** that sweeps through everything the signal needs, which is
+ *   the better input and not obviously so. Face enrolment keeps the best 40%
+ *   of at least ten frames, so a slow head turn hands the branch a spread to
+ *   choose from where three held poses hand it three. It is also one recording
+ *   instead of three uploads.
+ *
+ *   **Separate photos**, for when video is not available — someone working
+ *   from a case file has stills and nothing else.
+ *
+ * Both are collected if both are given; the backend runs every branch over
+ * every observation, so nothing is thrown away for being in the wrong slot.
+ * The mode switch changes what is asked for, not what is accepted.
  */
 const SECTIONS = [
   {
     key: 'face',
     title: 'Face',
-    subtitle: 'Photos or video · the strongest signal, and the fussiest',
-    // ArcFace scores a frame by det_score x frontality x resolution. Frontality
-    // is full credit to face.frontal_yaw_deg (20 deg) and reaches ZERO at
-    // face.max_yaw_deg (65 deg) -- so a true profile contributes literally
-    // nothing, and asking for one wastes the operator's time. Resolution is
-    // capped at face.ideal_face_height (112px of face, not of person).
+    subtitle: 'The strongest signal, and the fussiest',
+    // ArcFace scores a frame by det_score x frontality x resolution.
+    // Frontality is full credit to face.frontal_yaw_deg (20°) and reaches ZERO
+    // at face.max_yaw_deg (65°) -- a true profile contributes nothing, so
+    // asking for one wastes the operator's time. Resolution caps at
+    // face.ideal_face_height (112px of face, not of person).
     spec: 'Face at least 112 px tall in frame, turned no more than 20° off centre for full credit.',
     limit:
-      'Past 65° off centre a frame is scored at zero — a true side profile and the ' +
-      'back of a head contribute nothing at all, so do not bother recording them.',
-    // enroll_top_fraction 0.4 over enroll_min_frames 10: the best 40% of at
-    // least ten frames survive, so a slow sweep beats one held pose.
-    prompt:
-      'Face the camera, then turn your head slowly to one side and back — stop ' +
-      'well before your nose leaves the frame.',
-    angles: [
+      'Past 65° off centre a frame counts for nothing — a true side profile and ' +
+      'the back of a head are worth zero, so there is no point recording them.',
+    video: {
+      instruction:
+        'Look straight at the camera, then turn your head slowly to the left ' +
+        'and back, then slowly to the right and back. Ten seconds is plenty. ' +
+        'Stop turning well before your nose leaves the frame.',
+      covers: [
+        'Looking straight at the camera',
+        'Head turned a little to the left',
+        'Head turned a little to the right',
+      ],
+      // enroll_top_fraction 0.4 over enroll_min_frames 10: the best 40% of at
+      // least ten frames survive, so a sweep beats a held pose.
+      why: 'A slow turn gives the model dozens of frames to pick its best from. Three photos give it three.',
+    },
+    photos: [
       {
-        label: 'Straight on',
-        guide: 'Looking directly at the lens, eyes level. This is the reference frame.',
+        label: 'Looking straight at the camera',
+        guide: 'Eyes level, face filling a good part of the frame.',
       },
       {
-        label: 'Quarter-turn left',
-        guide: 'About 30° — one ear still visible. Not a profile.',
+        label: 'Head turned a little to the left',
+        guide: 'About a quarter turn — you should still see one whole ear. Not a side-on profile.',
       },
       {
-        label: 'Quarter-turn right',
-        guide: 'About 30° the other way. Both quarter-turns together beat one perfect front shot.',
+        label: 'Head turned a little to the right',
+        guide: 'The same, the other way.',
       },
     ],
   },
   {
     key: 'gait',
     title: 'Gait',
-    subtitle: 'Video only · of them walking across the frame',
+    subtitle: 'How they walk — video only',
     // The cadence signal is the width of the LOWER THIRD of the silhouette --
     // the legs. Only a side-on walk swings that width; walking at the camera
     // keeps the legs inside the body outline and fails min_swing_ratio. Full
@@ -69,48 +83,50 @@ const SECTIONS = [
     spec: 'Four seconds or more of unbroken walking, seen from the side, whole body inside the frame.',
     limit:
       'Gait is read from how far the legs swing apart, so it only works side on. ' +
-      'Walking towards or away from the camera gives almost no signal, and a still ' +
-      'photograph gives none whatsoever. Keep a gap above the head and below the ' +
-      'feet: a body touching the edge of frame is scored down, not just cropped.',
-    prompt:
-      'Walk across the frame, side on, at a normal pace — two full lengths is ' +
-      'better than one. Keep the whole body visible throughout.',
-    angles: [
-      {
-        label: 'Walking left to right',
-        guide: 'Camera side on, perpendicular to the direction of travel. Plain background if you can.',
-      },
-      {
-        label: 'Walking right to left',
-        guide: 'The same walk mirrored. Optional, but it covers cameras looking the other way.',
-      },
-    ],
+      'Walking towards or away from the camera gives almost nothing. Keep a gap ' +
+      'above the head and below the feet — a body touching the edge of frame is ' +
+      'marked down, not just cropped.',
+    videoOnly: true,
+    video: {
+      instruction:
+        'Stand side on to the camera and walk across the frame at a normal ' +
+        'pace, then turn round and walk back. Keep the whole body visible the ' +
+        'whole way across.',
+      covers: ['Walking one way, side on', 'Walking back the other way'],
+      why: 'A photograph contains no gait at all, and neither does standing still or turning on the spot.',
+    },
+    photos: [],
   },
   {
     key: 'reid',
     title: 'Appearance',
-    subtitle: 'Photos or video · build and clothing, from any side',
+    subtitle: 'Build and clothing, from any side',
     // OSNet quality is resolution x aspect-ratio x detection confidence. It is
     // deliberately pose-blind -- a back view is fully usable, which is the
     // whole point of the modality when a face is never visible. Resolution
     // caps at reid.ideal_box_height (192px of person); the aspect score peaks
-    // at reid.ideal_aspect 2.5, i.e. a normal standing figure.
+    // at reid.ideal_aspect 2.5, a normal standing figure.
     spec: 'Whole body, head to feet, at least 192 px tall. Standing normally, arms down.',
     limit:
-      'This one does not care which way they face — a back view is as good as a ' +
-      'front one, and often the only view a real camera gets. It does care about ' +
-      'the whole body being there: half a person, or two people in one box, ' +
-      'produces a vector describing neither. It also describes clothing more ' +
-      'than the person, so it goes stale within days.',
-    prompt:
-      'Stand a few steps back so your whole body is in frame, arms at your sides.',
-    angles: [
-      { label: 'Front, full body', guide: 'Head to feet, standing straight, arms down.' },
+      'This one does not care which way they face — a view from behind is as ' +
+      'good as one from the front, and is often all a real camera gets. It does ' +
+      'care that the whole body is in frame: half a person, or two people in one ' +
+      'box, describes neither. It also reads clothing more than the person, so ' +
+      'it goes stale within days.',
+    video: {
+      instruction:
+        'Stand a few steps back so the whole body is in frame, arms at your ' +
+        'sides, and turn slowly all the way round.',
+      covers: ['From the front', 'From behind', 'From each side'],
+      why: 'One turn covers every side, which is what this signal wants — it is the one that has to work when no face is ever visible.',
+    },
+    photos: [
+      { label: 'From the front', guide: 'Head to feet, standing straight, arms down.' },
       {
-        label: 'Back, full body',
-        guide: 'Genuinely useful here — most CCTV never sees a face.',
+        label: 'From behind',
+        guide: 'Genuinely worth having — most cameras never get a face.',
       },
-      { label: 'Side, full body', guide: 'Fills in the silhouette from the third direction.' },
+      { label: 'From the side', guide: 'Fills in the shape from the third direction.' },
     ],
   },
 ]
@@ -126,7 +142,11 @@ const initialSections = () =>
   Object.fromEntries(
     SECTIONS.map((section) => [
       section.key,
-      section.angles.map((angle) => newAngle(angle)),
+      {
+        mode: 'video',
+        video: [newAngle({ label: 'Video' })],
+        photos: section.photos.map(newAngle),
+      },
     ]),
   )
 
@@ -139,9 +159,9 @@ const humanSize = (bytes) =>
  * Rename a file to say where it came from.
  *
  * The server reports rejected files by name, and "IMG_0007.jpg gave nothing"
- * is not actionable while "gait--side-on-walk--IMG_0007.jpg gave nothing"
- * tells you which recording to redo. It also lands in the enrolment's audit
- * record, so the provenance of a stored template survives the session.
+ * is not actionable while "gait--walking-one-way--IMG_0007.jpg gave nothing"
+ * names the recording to redo. It also lands in the enrolment's audit record,
+ * so the provenance of a stored template survives the session.
  */
 function label(file, sectionKey, angleLabel) {
   const slug = (text) =>
@@ -154,9 +174,16 @@ function label(file, sectionKey, angleLabel) {
   }
 }
 
+const filesOf = (state) => [...state.video, ...state.photos].flatMap((a) => a.files)
+
+const labelledFiles = (sectionKey, state) =>
+  [...state.video, ...state.photos].flatMap((angle) =>
+    angle.files.map((file) => label(file, sectionKey, angle.label)),
+  )
+
 /* ---------------------------------------------------------------- dropzone */
 
-function DropZone({ accept, onFiles, disabled }) {
+function DropZone({ accept, onFiles, disabled, prompt, hint }) {
   const [over, setOver] = useState(false)
 
   const take = (list) => {
@@ -188,28 +215,53 @@ function DropZone({ accept, onFiles, disabled }) {
           event.target.value = ''
         }}
       />
-      <div className="dropzone-label">Drop files here, or click to choose</div>
-      <div className="dropzone-hint">
-        {accept.includes('image') ? 'Video or photos' : 'Video only'}
-      </div>
+      <span className="dropzone-label">{prompt}</span>
+      <span className="dropzone-hint">{hint}</span>
     </label>
+  )
+}
+
+function FileList({ files, onRemove, disabled }) {
+  if (!files.length) return null
+  return (
+    <ul className="filelist">
+      {files.map((file, position) => (
+        <li key={`${file.name}-${position}`}>
+          <span className="filename mono">{file.name}</span>
+          <span className="filesize">{humanSize(file.size)}</span>
+          <button
+            type="button"
+            className="btn-icon"
+            aria-label={`Remove ${file.name}`}
+            title="Remove"
+            onClick={() => onRemove(position)}
+            disabled={disabled}
+          >
+            ✕
+          </button>
+        </li>
+      ))}
+    </ul>
   )
 }
 
 /* ----------------------------------------------------------------- section */
 
-function CaptureSection({ section, index, angles, setAngles, onError, busy }) {
+function CaptureSection({ section, index, state, setState, onError, busy }) {
   const [checking, setChecking] = useState(false)
   const [report, setReport] = useState(null)
 
-  const files = angles.flatMap((angle) => angle.files)
+  const files = filesOf(state)
   const accept = section.key === 'gait' ? 'video/*' : 'image/*,video/*'
+  const mode = section.videoOnly ? 'video' : state.mode
+  const angles = state[mode]
+  const otherCount = filesOf({ ...state, [mode]: [] }).length
+
+  const setAngles = (next) => setState({ ...state, [mode]: next })
 
   const update = (angleId, changes) =>
     setAngles(
-      angles.map((angle) =>
-        angle.id === angleId ? { ...angle, ...changes } : angle,
-      ),
+      angles.map((angle) => (angle.id === angleId ? { ...angle, ...changes } : angle)),
     )
 
   const addFiles = (angleId, incoming) => {
@@ -220,9 +272,7 @@ function CaptureSection({ section, index, angles, setAngles, onError, busy }) {
 
   const removeFile = (angleId, position) => {
     const angle = angles.find((entry) => entry.id === angleId)
-    update(angleId, {
-      files: angle.files.filter((_, index) => index !== position),
-    })
+    update(angleId, { files: angle.files.filter((_, i) => i !== position) })
     setReport(null)
   }
 
@@ -230,7 +280,7 @@ function CaptureSection({ section, index, angles, setAngles, onError, busy }) {
    * Check what this section alone produced.
    *
    * Per-section rather than per-upload on purpose: told "gait: not ready" for
-   * a whole submission, you do not know which recording failed. Told it about
+   * a whole submission you do not know which recording failed. Told it about
    * the walking video specifically, you know exactly what to record again.
    */
   const check = async () => {
@@ -241,11 +291,7 @@ function CaptureSection({ section, index, angles, setAngles, onError, busy }) {
     setChecking(true)
     setReport(null)
     try {
-      const preview = await api.previewEnrollment(
-        angles.flatMap((angle) =>
-          angle.files.map((file) => label(file, section.key, angle.label)),
-        ),
-      )
+      const preview = await api.previewEnrollment(labelledFiles(section.key, state))
       setReport(preview.readiness.find((entry) => entry.modality === section.key))
     } catch (exception) {
       onError(exception.message)
@@ -269,92 +315,127 @@ function CaptureSection({ section, index, angles, setAngles, onError, busy }) {
 
       <div className="capture-body">
         <p className="spec">{section.spec}</p>
-        <p className="muted small" style={{ marginBottom: 14 }}>
+        <p className="muted small" style={{ marginBottom: 16 }}>
           {section.limit}
         </p>
 
-        <div className="angles">
-          {angles.map((angle) => (
-            <div className="angle" key={angle.id}>
-              <div className="angle-head">
-                <input
-                  type="text"
-                  value={angle.label}
-                  onChange={(event) => update(angle.id, { label: event.target.value })}
-                  aria-label="Angle name"
-                  disabled={busy}
-                />
-                {angle.files.length > 0 && (
-                  <span className="angle-count muted small">
-                    {angle.files.length} file{angle.files.length > 1 ? 's' : ''}
-                  </span>
-                )}
-                {angles.length > 1 && (
-                  <button
-                    type="button"
-                    className="btn-icon"
-                    aria-label={`Remove the ${angle.label} angle`}
-                    title="Remove this angle"
-                    onClick={() =>
-                      setAngles(angles.filter((entry) => entry.id !== angle.id))
-                    }
-                    disabled={busy}
-                  >
-                    ✕
-                  </button>
-                )}
-              </div>
+        {!section.videoOnly && (
+          <div className="mode-switch" role="group" aria-label="How to provide footage">
+            <button
+              type="button"
+              className={`mode ${mode === 'video' ? 'active' : ''}`}
+              onClick={() => setState({ ...state, mode: 'video' })}
+              disabled={busy}
+            >
+              One video
+            </button>
+            <button
+              type="button"
+              className={`mode ${mode === 'photos' ? 'active' : ''}`}
+              onClick={() => setState({ ...state, mode: 'photos' })}
+              disabled={busy}
+            >
+              Separate photos
+            </button>
+          </div>
+        )}
 
-              {angle.guide && <p className="angle-guide">{angle.guide}</p>}
+        {mode === 'video' ? (
+          <div className="angle">
+            <p className="video-instruction">{section.video.instruction}</p>
+            <ul className="covers">
+              {section.video.covers.map((item) => (
+                <li key={item}>{item}</li>
+              ))}
+            </ul>
+            <p className="muted small" style={{ marginBottom: 10 }}>
+              {section.video.why}
+            </p>
 
-              <DropZone
-                accept={accept}
+            <DropZone
+              accept={accept}
+              disabled={busy}
+              prompt="Drop the video here, or click to choose"
+              hint={section.videoOnly ? 'Video only' : 'Video — photos are on the other tab'}
+              onFiles={(incoming) => addFiles(angles[0].id, incoming)}
+            />
+            <FileList
+              files={angles[0].files}
+              disabled={busy}
+              onRemove={(position) => removeFile(angles[0].id, position)}
+            />
+
+            <div style={{ marginTop: 10 }}>
+              <Recorder
+                prompt={section.video.instruction}
                 disabled={busy}
-                onFiles={(incoming) => addFiles(angle.id, incoming)}
+                onRecorded={(file) => addFiles(angles[0].id, [file])}
               />
+            </div>
+          </div>
+        ) : (
+          <div className="angles">
+            {angles.map((angle) => (
+              <div className="angle" key={angle.id}>
+                <div className="angle-head">
+                  <input
+                    type="text"
+                    value={angle.label}
+                    onChange={(event) => update(angle.id, { label: event.target.value })}
+                    aria-label="What this photo shows"
+                    disabled={busy}
+                  />
+                  {angle.files.length > 0 && (
+                    <span className="angle-count muted small">
+                      {angle.files.length} file{angle.files.length > 1 ? 's' : ''}
+                    </span>
+                  )}
+                  {angles.length > 1 && (
+                    <button
+                      type="button"
+                      className="btn-icon"
+                      aria-label={`Remove the "${angle.label}" slot`}
+                      title="Remove this slot"
+                      onClick={() =>
+                        setAngles(angles.filter((entry) => entry.id !== angle.id))
+                      }
+                      disabled={busy}
+                    >
+                      ✕
+                    </button>
+                  )}
+                </div>
 
-              {angle.files.length > 0 && (
-                <ul className="filelist">
-                  {angle.files.map((file, position) => (
-                    <li key={`${file.name}-${position}`}>
-                      <span className="filename mono">{file.name}</span>
-                      <span className="filesize">{humanSize(file.size)}</span>
-                      <button
-                        type="button"
-                        className="btn-icon"
-                        title="Remove"
-                        onClick={() => removeFile(angle.id, position)}
-                        disabled={busy}
-                      >
-                        ✕
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              )}
+                {angle.guide && <p className="angle-guide">{angle.guide}</p>}
 
-              <div style={{ marginTop: 10 }}>
-                <Recorder
-                  prompt={section.prompt}
+                <DropZone
+                  accept={accept}
                   disabled={busy}
-                  onRecorded={(file) => addFiles(angle.id, [file])}
+                  prompt="Drop photos here, or click to choose"
+                  hint="Photos"
+                  onFiles={(incoming) => addFiles(angle.id, incoming)}
+                />
+                <FileList
+                  files={angle.files}
+                  disabled={busy}
+                  onRemove={(position) => removeFile(angle.id, position)}
                 />
               </div>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        )}
 
-        <div className="actions" style={{ marginTop: 12 }}>
-          <button
-            type="button"
-            className="btn btn-quiet btn-small"
-            onClick={() =>
-              setAngles([...angles, newAngle({ label: 'Another angle' })])
-            }
-            disabled={busy}
-          >
-            + Add angle
-          </button>
+        <div className="actions" style={{ marginTop: 14 }}>
+          {mode === 'photos' && (
+            <button
+              type="button"
+              className="btn btn-quiet btn-small"
+              onClick={() => setAngles([...angles, newAngle({ label: 'Another view' })])}
+              disabled={busy}
+            >
+              + Add another view
+            </button>
+          )}
           <button
             type="button"
             className="btn btn-quiet btn-small"
@@ -365,15 +446,21 @@ function CaptureSection({ section, index, angles, setAngles, onError, busy }) {
           </button>
         </div>
 
+        {otherCount > 0 && (
+          <p className="muted small" style={{ marginTop: 10 }}>
+            {otherCount} file{otherCount > 1 ? 's' : ''} added under{' '}
+            {mode === 'video' ? '“Separate photos”' : '“One video”'} will be sent
+            too — switching tabs hides them, it does not drop them.
+          </p>
+        )}
+
         {report && (
           <p className={report.ready ? 'notice' : 'caution'} style={{ marginBottom: 0 }}>
             <span className={report.ready ? 'ok' : 'not-ok'}>
               {report.ready ? 'ready' : 'not ready'}
             </span>{' '}
             {report.reason}
-            {!report.ready && (
-              <span className="muted"> {report.requirement}</span>
-            )}
+            {!report.ready && <span className="muted"> {report.requirement}</span>}
           </p>
         )}
       </div>
@@ -396,12 +483,7 @@ export default function Register({ onError, onRegistered }) {
   const busy = Boolean(job)
 
   const allFiles = useMemo(
-    () =>
-      SECTIONS.flatMap((section) =>
-        sections[section.key].flatMap((angle) =>
-          angle.files.map((file) => label(file, section.key, angle.label)),
-        ),
-      ),
+    () => SECTIONS.flatMap((section) => labelledFiles(section.key, sections[section.key])),
     [sections],
   )
 
@@ -417,7 +499,9 @@ export default function Register({ onError, onRegistered }) {
     event.preventDefault()
 
     if (!personId.trim() || !displayName.trim()) {
-      onError('A name and an ID are both required — a record with neither cannot be reviewed later.')
+      onError(
+        'A name and an ID are both required — a record with neither cannot be reviewed later.',
+      )
       return
     }
     if (!allFiles.length) {
@@ -525,9 +609,9 @@ export default function Register({ onError, onRegistered }) {
           key={section.key}
           section={section}
           index={index}
-          angles={sections[section.key]}
-          setAngles={(angles) =>
-            setSections((current) => ({ ...current, [section.key]: angles }))
+          state={sections[section.key]}
+          setState={(next) =>
+            setSections((current) => ({ ...current, [section.key]: next }))
           }
           onError={onError}
           busy={busy}
@@ -599,16 +683,13 @@ export default function Register({ onError, onRegistered }) {
       )}
 
       <div className="actions actions-end" style={{ marginTop: 18 }}>
-        <button
-          type="button"
-          className="btn btn-quiet"
-          onClick={reset}
-          disabled={busy}
-        >
+        <button type="button" className="btn btn-quiet" onClick={reset} disabled={busy}>
           Clear
         </button>
         <button className="btn btn-primary" type="submit" disabled={busy}>
-          {busy ? 'Registering…' : `Register${allFiles.length ? ` — ${allFiles.length} file(s)` : ''}`}
+          {busy
+            ? 'Registering…'
+            : `Register${allFiles.length ? ` — ${allFiles.length} file(s)` : ''}`}
         </button>
       </div>
     </form>

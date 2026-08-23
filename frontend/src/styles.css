@@ -340,11 +340,22 @@ label.checkbox input {
 
 /* --- file drop zones ------------------------------------------------------ */
 
+/* `display` is not optional here. This is a <label>, which is inline by
+   default, and an inline box holding block children renders as a collapsed
+   dashed sliver on the left while the children escape it and stretch the full
+   width of the card. It looked like a broken border rather than a missing
+   display rule, which is why it survived a build and a DOM audit. */
 .dropzone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  min-height: 96px;
   border: 1px dashed var(--line-2);
   border-radius: var(--radius);
   background: var(--paper-2);
-  padding: 18px;
+  padding: 20px 18px;
   text-align: center;
   cursor: pointer;
   transition: border-color 0.12s ease, background 0.12s ease;
@@ -354,8 +365,56 @@ label.checkbox input {
   background: var(--paper-3);
 }
 .dropzone input[type="file"] { display: none; }
-.dropzone-label { font-size: 0.8125rem; font-weight: 500; }
-.dropzone-hint { font-size: 0.75rem; color: var(--ink-3); margin-top: 2px; }
+.dropzone-label { font-size: 0.8125rem; font-weight: 600; }
+.dropzone-hint { font-size: 0.75rem; color: var(--ink-3); }
+
+/* --- one video / separate photos ------------------------------------------ */
+
+.mode-switch {
+  display: inline-flex;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  overflow: hidden;
+  margin-bottom: 14px;
+}
+.mode {
+  font: inherit;
+  font-size: 0.8125rem;
+  background: var(--paper);
+  color: var(--ink-3);
+  border: none;
+  border-right: 1px solid var(--line-2);
+  padding: 7px 16px;
+  cursor: pointer;
+  min-height: 32px;
+}
+.mode:last-child { border-right: none; }
+.mode:hover:not(.active):not(:disabled) { background: var(--paper-3); color: var(--ink); }
+.mode.active { background: var(--ink); color: var(--paper); font-weight: 600; }
+.mode:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.video-instruction {
+  font-size: 0.875rem;
+  color: var(--ink);
+  margin-bottom: 8px;
+}
+.covers {
+  list-style: none;
+  margin: 0 0 8px;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+}
+.covers li {
+  font-size: 0.75rem;
+  color: var(--ink-2);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 2px 10px;
+  background: var(--paper);
+}
+.covers li::before { content: "✓ "; font-weight: 600; }
 
 .filelist { list-style: none; margin: 10px 0 0; padding: 0; }
 .filelist li {
