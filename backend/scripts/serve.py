@@ -6,9 +6,16 @@
 
 Interactive docs at http://127.0.0.1:8000/docs once running.
 
-The database holds biometric templates and the full match audit trail. Set
-FRS_TEMPLATE_ENCRYPTION_KEY before enrolling anyone, or templates are stored in
-the clear and every write logs a warning saying so.
+The database holds biometric templates and the full match audit trail.
+FRS_TEMPLATE_ENCRYPTION_KEY MUST be set before enrolling anyone -- without
+it, enrolment is refused outright rather than falling back to plaintext
+(SEC-06):
+
+    python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    export FRS_TEMPLATE_ENCRYPTION_KEY=<that key>
+
+For throwaway local data only, FRS_ALLOW_PLAINTEXT_TEMPLATES=1 opts back
+into writing plaintext deliberately.
 """
 
 from __future__ import annotations
@@ -30,7 +37,11 @@ from app.db.repository import (  # noqa: E402
     make_engine,
     session_factory,
 )
-from app.matching.gallery import TEMPLATE_KEY_ENV, GalleryStore  # noqa: E402
+from app.matching.gallery import (  # noqa: E402
+    ALLOW_PLAINTEXT_ENV,
+    TEMPLATE_KEY_ENV,
+    GalleryStore,
+)
 
 
 def default_db_url(settings) -> str:
@@ -74,12 +85,11 @@ def import_enrollments(args) -> int:
 
     session.close()
     print(f"\n{imported} imported, {skipped} skipped.")
-    if not os.environ.get(TEMPLATE_KEY_ENV):
-        print(
-            f"\nWARNING: {TEMPLATE_KEY_ENV} is not set, so those templates are "
-            "stored unencrypted.\nSection 8 of the build plan requires "
-            "encryption at rest."
-        )
+    # Every skip already carries its own reason (see refuse_plaintext in
+    # app/matching/gallery.py) -- nothing to add here. This used to claim
+    # the imports "are stored unencrypted", true before SEC-06 and backwards
+    # after it: a missing key means those people were skipped, not
+    # silently written in the clear.
     return 0
 
 
@@ -87,11 +97,27 @@ def serve(args) -> int:
     settings = get_settings()
     setup_logging(settings.logging.level)
 
-    if not os.environ.get(TEMPLATE_KEY_ENV):
-        print(
-            f"WARNING: {TEMPLATE_KEY_ENV} is not set. Any template enrolled "
-            "through this\n         instance will be stored unencrypted.\n"
-        )
+    if not os.environ.get(TEMPLATE_KEY_ENV) and not os.environ.get(ALLOW_PLAINTEXT_ENV):
+        # This used to say enrolment "will be stored unencrypted" -- true
+        # before SEC-06, backwards after it: enrolling now REFUSES outright.
+        # A warning easy to miss in a scrolling terminal used to describe a
+        # degraded mode; today it is hiding a hard failure the operator is
+        # about to hit the moment they try to register anyone.
+        for line in (
+            "",
+            f"  !! {TEMPLATE_KEY_ENV} IS NOT SET !!",
+            "  Registering anyone will be refused, not stored unencrypted --",
+            "  SEC-06 does not allow a silent plaintext fallback. Generate a",
+            "  key and set it before you try to enrol anyone:",
+            "",
+            "    python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\"",
+            f"    export {TEMPLATE_KEY_ENV}=<that key>",
+            "",
+            f"  For throwaway local data only, set {ALLOW_PLAINTEXT_ENV}=1",
+            "  instead to write plaintext deliberately.",
+            "",
+        ):
+            print(line)
 
     database_url = args.db_url or default_db_url(settings)
     settings.paths.data_dir.mkdir(parents=True, exist_ok=True)
