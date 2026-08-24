@@ -7,6 +7,7 @@ channel, a pickle sink, and a path that escapes its root.
 
 from __future__ import annotations
 
+import os
 import ssl
 from pathlib import Path
 
@@ -985,3 +986,99 @@ class TestDemoModeIsOffUnlessAskedFor:
             # far. Either way no token comes back, which is the claim.
             assert response.status_code in (401, 422), password
             assert "token" not in response.json()
+
+
+class TestDemoModeAlsoWaivesEncryption:
+    """--demo skips the encryption-key requirement too, not just sign-in.
+
+    Requested directly: showing the prototype should not need an operator to
+    generate and export a Fernet key first. SEC-06 itself is not weakened --
+    a real deployment that never passes --demo still refuses to write
+    plaintext by default, exactly as before. This only relaxes the one flag
+    that already means "no security here, this is a demo".
+    """
+
+    @staticmethod
+    def _import_serve():
+        import importlib
+        import sys
+        from pathlib import Path
+
+        scripts = Path(__file__).resolve().parents[1] / "scripts"
+        if str(scripts) not in sys.path:
+            sys.path.insert(0, str(scripts))
+        sys.modules.pop("serve", None)
+        return importlib.import_module("serve")
+
+    def test_demo_sets_the_plaintext_flag_when_nothing_is_configured(
+        self, monkeypatch
+    ) -> None:
+        monkeypatch.delenv("FRS_TEMPLATE_ENCRYPTION_KEY", raising=False)
+        monkeypatch.delenv("FRS_ALLOW_PLAINTEXT_TEMPLATES", raising=False)
+        serve = self._import_serve()
+
+        serve.apply_demo_environment(demo=True)
+
+        assert os.environ.get("FRS_ALLOW_PLAINTEXT_TEMPLATES") == "1"
+
+    def test_a_real_key_is_never_downgraded_by_demo(self, monkeypatch) -> None:
+        """The flag some people forget to unset later must not silently
+        matter once a real key is actually configured."""
+        monkeypatch.setenv("FRS_TEMPLATE_ENCRYPTION_KEY", "not-a-real-key-but-present")
+        monkeypatch.delenv("FRS_ALLOW_PLAINTEXT_TEMPLATES", raising=False)
+        serve = self._import_serve()
+
+        serve.apply_demo_environment(demo=True)
+
+        assert os.environ.get("FRS_ALLOW_PLAINTEXT_TEMPLATES") is None
+
+    def test_without_demo_nothing_changes(self, monkeypatch) -> None:
+        monkeypatch.delenv("FRS_TEMPLATE_ENCRYPTION_KEY", raising=False)
+        monkeypatch.delenv("FRS_ALLOW_PLAINTEXT_TEMPLATES", raising=False)
+        serve = self._import_serve()
+
+        serve.apply_demo_environment(demo=False)
+
+        assert os.environ.get("FRS_ALLOW_PLAINTEXT_TEMPLATES") is None
+
+    def test_registering_someone_now_works_under_demo_with_no_setup(
+        self, monkeypatch
+    ) -> None:
+        """The end-to-end claim: --demo alone is enough to register someone,
+        with nothing exported by hand first."""
+        from app.core.types import Modality, ModalityEmbedding
+        from app.db.repository import (
+            WatchlistRepository,
+            create_schema,
+            session_factory,
+        )
+
+        monkeypatch.delenv("FRS_TEMPLATE_ENCRYPTION_KEY", raising=False)
+        monkeypatch.delenv("FRS_ALLOW_PLAINTEXT_TEMPLATES", raising=False)
+        serve = self._import_serve()
+        serve.apply_demo_environment(demo=True)
+
+        engine = make_engine("sqlite:///:memory:")
+        create_schema(engine)
+        session = session_factory(engine)()
+        try:
+            repo = WatchlistRepository(session)
+            person = repo.enroll(
+                "no-setup-check",
+                "No Setup Check",
+                {
+                    Modality.FACE: ModalityEmbedding(
+                        modality=Modality.FACE,
+                        vector=np.ones(8, dtype=np.float32),
+                        quality=0.9,
+                        frames_used=5,
+                    )
+                },
+                reference_jpeg=b"\xff\xd8\xff\xe0not a real jpeg but bytes",
+            )
+            assert person is not None
+            assert person.reference_jpeg is not None
+            # Not encrypted: no key was ever configured, only the demo waiver.
+            assert not person.reference_jpeg.startswith(b"FRSENC1:")
+        finally:
+            session.close()

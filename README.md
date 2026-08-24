@@ -223,7 +223,8 @@ Set it as `FRS_TEMPLATE_ENCRYPTION_KEY` (see `.env.example`).
 plaintext, which made the insecure state the default and — because encryption
 is recorded per template — let a database end up half-encrypted while still
 looking right in a spot check. For local work with throwaway data, set
-`FRS_ALLOW_PLAINTEXT_TEMPLATES=1` to make that choice deliberate.
+`FRS_ALLOW_PLAINTEXT_TEMPLATES=1` to make that choice deliberate — or start
+the server with `--demo`, which sets it for you (see below).
 
 Keep the key somewhere other than the database it protects: records encrypted
 with a key cannot be read back without it.
@@ -352,6 +353,12 @@ at all — the console opens straight onto the console:
 ```bash
 cd backend && python scripts/serve.py --demo
 ```
+
+`--demo` also waives the encryption-key requirement below, as long as no key
+is set — registering someone needs nothing exported by hand first. A real key
+set alongside `--demo` still wins and templates get encrypted as normal; the
+flag only relaxes an unconfigured instance, never downgrades one that was
+actually set up.
 
 Every action is then recorded against a shared `demo` operator, the server
 prints a warning on start, and the console says so on every page. It is off

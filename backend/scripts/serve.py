@@ -14,8 +14,10 @@ it, enrolment is refused outright rather than falling back to plaintext
     python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
     export FRS_TEMPLATE_ENCRYPTION_KEY=<that key>
 
-For throwaway local data only, FRS_ALLOW_PLAINTEXT_TEMPLATES=1 opts back
-into writing plaintext deliberately.
+For showing the prototype without any of that, use --demo: it skips sign-in
+and, as long as no key is set, skips the encryption requirement too. For
+throwaway local data without --demo, FRS_ALLOW_PLAINTEXT_TEMPLATES=1 opts
+back into writing plaintext deliberately.
 """
 
 from __future__ import annotations
@@ -93,9 +95,26 @@ def import_enrollments(args) -> int:
     return 0
 
 
+def apply_demo_environment(demo: bool) -> None:
+    """--demo means "showing the prototype, skip the friction" -- that already
+    covered sign-in; it now covers the encryption key too.
+
+    A real key set alongside --demo still wins: _fernet() checks for one
+    before ever looking at ALLOW_PLAINTEXT_ENV, so this can only relax an
+    unconfigured instance, never downgrade one that was actually set up.
+
+    A function of its own rather than inline in serve() so it is something a
+    test can call without also standing up uvicorn.
+    """
+    if demo and not os.environ.get(TEMPLATE_KEY_ENV):
+        os.environ.setdefault(ALLOW_PLAINTEXT_ENV, "1")
+
+
 def serve(args) -> int:
     settings = get_settings()
     setup_logging(settings.logging.level)
+
+    apply_demo_environment(args.demo)
 
     if not os.environ.get(TEMPLATE_KEY_ENV) and not os.environ.get(ALLOW_PLAINTEXT_ENV):
         # This used to say enrolment "will be stored unencrypted" -- true
@@ -113,8 +132,8 @@ def serve(args) -> int:
             "    python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\"",
             f"    export {TEMPLATE_KEY_ENV}=<that key>",
             "",
-            f"  For throwaway local data only, set {ALLOW_PLAINTEXT_ENV}=1",
-            "  instead to write plaintext deliberately.",
+            "  Or run with --demo, which turns this off along with sign-in --",
+            "  fine for showing the prototype, not for anyone real.",
             "",
         ):
             print(line)
@@ -130,11 +149,13 @@ def serve(args) -> int:
         settings.demo_mode = True
         for line in (
             "",
-            "  !! SIGN-IN IS OFF (--demo) !!",
-            "  Anyone who can reach this port can read the watchlist and",
-            "  confirm an identification. Every action is recorded against",
-            "  the 'demo' operator, so the trail shows nothing about who",
-            "  actually did it. Prototype use only.",
+            "  !! PROTOTYPE MODE (--demo) !!",
+            "  Sign-in is off: anyone who can reach this port can read the",
+            "  watchlist and confirm an identification, recorded against a",
+            "  shared 'demo' operator that shows nothing about who really did",
+            "  it. Registration photos and biometric templates are stored",
+            "  unencrypted unless FRS_TEMPLATE_ENCRYPTION_KEY is set. Fine for",
+            "  showing the prototype on your own machine; not for real data.",
             "",
         ):
             print(line)
@@ -152,9 +173,10 @@ def main(argv: list[str] | None = None) -> int:
         "--demo",
         action="store_true",
         help=(
-            "Skip sign-in entirely. For showing the prototype. Every action is "
-            "recorded against a 'demo' operator and anyone who can reach the "
-            "port can take any action, including confirming an identification."
+            "For showing the prototype: skips sign-in, and skips the encryption "
+            "key requirement (unless one is set). Anyone who can reach the port "
+            "can take any action, and registration photos are stored in the "
+            "clear. Not for real data."
         ),
     )
     parser.add_argument("--host", default="127.0.0.1")
