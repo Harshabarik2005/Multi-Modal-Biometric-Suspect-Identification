@@ -1179,3 +1179,78 @@ class TestMissingPipelineDepsFailAtStartup:
         assert "deep-sort-realtime" in printed
         assert sys.executable in printed
         assert "Refusing to start" in printed
+
+
+class TestPortInUseFailsBeforeTheBanner:
+    """An occupied port used to be announced only by uvicorn, after its own
+    startup had already logged "Application startup complete".
+
+    What the operator saw was the friendly prototype banner, a
+    "Docs : http://127.0.0.1:8000/docs" line pointing at nothing, "Application
+    startup complete", and then a Windows errno buried underneath it all:
+    "only one usage of each socket address ... is normally permitted".
+    """
+
+    @staticmethod
+    def _import_serve():
+        import importlib
+        import sys
+        from pathlib import Path
+
+        scripts = Path(__file__).resolve().parents[1] / "scripts"
+        if str(scripts) not in sys.path:
+            sys.path.insert(0, str(scripts))
+        sys.modules.pop("serve", None)
+        return importlib.import_module("serve")
+
+    def test_a_free_port_reads_as_free(self) -> None:
+        import socket
+
+        serve = self._import_serve()
+
+        # Let the OS pick a port, then release it so it is genuinely free.
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+
+        assert serve.port_is_free("127.0.0.1", port) is True
+
+    def test_an_occupied_port_reads_as_occupied(self) -> None:
+        """The check that matters: the whole preflight is worthless if this
+        ever starts returning True."""
+        import socket
+
+        serve = self._import_serve()
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as holder:
+            holder.bind(("127.0.0.1", 0))
+            holder.listen(1)
+            port = holder.getsockname()[1]
+
+            assert serve.port_is_free("127.0.0.1", port) is False
+
+    def test_the_probe_does_not_leave_the_port_occupied(self) -> None:
+        """Checking a port must not be the thing that takes it."""
+        import socket
+
+        serve = self._import_serve()
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+
+        assert serve.port_is_free("127.0.0.1", port) is True
+        # Still bindable afterwards -- the probe released it.
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as after:
+            after.bind(("127.0.0.1", port))
+
+    def test_the_report_offers_a_way_out(self, capsys) -> None:
+        serve = self._import_serve()
+
+        serve.report_port_in_use("127.0.0.1", 8000)
+        printed = capsys.readouterr().out
+
+        assert "8000" in printed
+        assert "--port 8001" in printed, "should suggest a concrete next port"
+        assert "netstat" in printed
+        assert "Refusing to start" in printed

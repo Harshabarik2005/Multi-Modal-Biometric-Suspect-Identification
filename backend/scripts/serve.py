@@ -98,6 +98,50 @@ def find_project_venv() -> Path | None:
     return None
 
 
+def port_is_free(host: str, port: int) -> bool:
+    """Whether the server could actually bind here.
+
+    Deliberately no SO_REUSEADDR. On POSIX it permits binding a port still in
+    TIME_WAIT, which is precisely the "recently in use" state worth reporting;
+    and on Windows it muddies the result -- measured here, binding an occupied
+    port with it set fails with errno 13 rather than the WSAEADDRINUSE (10048)
+    you would expect and want to see. A plain bind answers the actual question.
+    """
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        try:
+            probe.bind((host, port))
+        except OSError:
+            return False
+    return True
+
+
+def report_port_in_use(host: str, port: int) -> None:
+    """Say what is wrong in words, before uvicorn says it in errno."""
+    lines = [
+        "",
+        f"  !! PORT {port} IS ALREADY IN USE !!",
+        "",
+        f"  Something is already listening on {host}:{port} -- most often",
+        "  another copy of this server that was never shut down.",
+        "",
+        "  Find it:",
+        f"    netstat -ano | findstr :{port}          (Windows)",
+        f"    lsof -i :{port}                          (macOS / Linux)",
+        "",
+        "  Then stop that process, or just use a different port:",
+        "",
+        f"    python scripts/serve.py --demo --port {port + 1}",
+        "",
+        "  Refusing to start. Carrying on would print a working-looking",
+        "  banner and a Docs URL that nothing is serving.",
+        "",
+    ]
+    for line in lines:
+        print(line)
+
+
 def report_missing_requirements(missing: list[str]) -> None:
     """Explain what is missing and, more usefully, why."""
     venv = find_project_venv()
@@ -214,6 +258,14 @@ def serve(args) -> int:
     missing = missing_pipeline_requirements()
     if missing:
         report_missing_requirements(missing)
+        return 1
+
+    # Checked here, before the banner and the "Docs: ..." line, so a bind
+    # failure is not buried under a screen of messages announcing success.
+    # uvicorn only discovers this after its own startup has logged
+    # "Application startup complete", which reads as though it worked.
+    if not port_is_free(args.host, args.port):
+        report_port_in_use(args.host, args.port)
         return 1
 
     if not os.environ.get(TEMPLATE_KEY_ENV) and not os.environ.get(ALLOW_PLAINTEXT_ENV):
