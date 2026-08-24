@@ -68,6 +68,14 @@ Confirm CUDA was picked up:
 python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
 ```
 
+**Keep the venv activated for everything below.** The pipeline's heavy
+dependencies (`deep-sort-realtime`, `insightface`, `ultralytics`) are imported
+lazily, so a server started with a different interpreter comes up perfectly,
+serves the whole console, and only fails — as a bare `500` — the moment you
+press Register or Check. `scripts/serve.py` now checks for them at startup and
+refuses to run rather than let that happen, naming the interpreter it is using
+and the venv it thinks you meant.
+
 If that prints `False`, everything still works — the pipeline falls back to CPU,
 just slower.
 

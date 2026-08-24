@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import ssl
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -162,8 +163,14 @@ class TestNoPickleSinks:
 
         embedder = ReIDEmbedder.__new__(ReIDEmbedder)
         embedder.cfg = get_settings().reid
+        # `__new__` skips __init__, so every attribute _download_weights reads
+        # has to be set by hand. DES-01 added `weights` (which checkpoint, not
+        # just which architecture) and this test was not updated -- it went
+        # unnoticed because it skips wherever gdown is absent, which included
+        # the interpreter the suite was usually run with.
+        embedder.weights = embedder.cfg.weights
 
-        fake = tmp_path / "osnet_x1_0_imagenet.pth"
+        fake = tmp_path / f"{embedder.cfg.model}_{embedder.weights}.pth"
         fake.write_bytes(b"<!DOCTYPE html><html>Quota exceeded</html>")
 
         import unittest.mock as mock
@@ -1082,3 +1089,93 @@ class TestDemoModeAlsoWaivesEncryption:
             assert not person.reference_jpeg.startswith(b"FRSENC1:")
         finally:
             session.close()
+
+
+class TestMissingPipelineDepsFailAtStartup:
+    """The pipeline's heavy imports are lazy, so a server missing them starts
+    fine and only dies when somebody presses a button.
+
+    That happened for real: the server was launched with the system
+    interpreter rather than the project venv, came up perfectly, served the
+    whole console, and then returned a bare 500 from /api/enroll/preview
+    because deep_sort_realtime was not installed. The traceback naming the
+    module was in the server log; all the operator saw was
+    "500 Internal Server Error".
+    """
+
+    @staticmethod
+    def _import_serve():
+        import importlib
+        import sys
+        from pathlib import Path
+
+        scripts = Path(__file__).resolve().parents[1] / "scripts"
+        if str(scripts) not in sys.path:
+            sys.path.insert(0, str(scripts))
+        sys.modules.pop("serve", None)
+        return importlib.import_module("serve")
+
+    def test_the_tracker_is_on_the_required_list(self) -> None:
+        """The specific module whose absence caused the 500."""
+        serve = self._import_serve()
+
+        assert "deep_sort_realtime" in serve.PIPELINE_REQUIREMENTS
+        assert "insightface" in serve.PIPELINE_REQUIREMENTS
+        assert "ultralytics" in serve.PIPELINE_REQUIREMENTS
+
+    def test_everything_present_reports_nothing_missing(self, monkeypatch) -> None:
+        """Answers are stubbed for every module, not just the interesting one,
+        so the result does not depend on what happens to be installed where
+        the suite runs -- the very split that caused the original bug."""
+        import importlib.util
+
+        serve = self._import_serve()
+        monkeypatch.setattr(
+            importlib.util, "find_spec", lambda name, *a, **k: object()
+        )
+
+        assert serve.missing_pipeline_requirements() == []
+
+    def test_a_missing_module_is_detected(self, monkeypatch) -> None:
+        import importlib.util
+
+        serve = self._import_serve()
+
+        def only_tracker_missing(name, *args, **kwargs):
+            return None if name == "deep_sort_realtime" else object()
+
+        monkeypatch.setattr(importlib.util, "find_spec", only_tracker_missing)
+
+        assert serve.missing_pipeline_requirements() == ["deep-sort-realtime"]
+
+    def test_a_module_that_raises_on_probe_counts_as_missing(
+        self, monkeypatch
+    ) -> None:
+        """find_spec raises rather than returning None for some broken
+        installs; that is still 'cannot run', not a crash in the check."""
+        import importlib.util
+
+        serve = self._import_serve()
+
+        def explode_on_tracker(name, *args, **kwargs):
+            if name == "deep_sort_realtime":
+                raise ValueError("broken __spec__")
+            return object()
+
+        monkeypatch.setattr(importlib.util, "find_spec", explode_on_tracker)
+
+        assert serve.missing_pipeline_requirements() == ["deep-sort-realtime"]
+
+    def test_the_report_names_the_interpreter_not_just_the_package(
+        self, capsys
+    ) -> None:
+        """Telling someone to `pip install` here would be actively harmful --
+        it installs into the wrong environment and abandons the venv."""
+        serve = self._import_serve()
+
+        serve.report_missing_requirements(["deep-sort-realtime"])
+        printed = capsys.readouterr().out
+
+        assert "deep-sort-realtime" in printed
+        assert sys.executable in printed
+        assert "Refusing to start" in printed

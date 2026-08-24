@@ -50,6 +50,98 @@ def default_db_url(settings) -> str:
     return f"sqlite:///{settings.paths.data_dir / 'faceless_frs.db'}"
 
 
+#: What the pipeline needs at runtime but imports lazily, mapped to the pip
+#: name that provides it.
+#:
+#: The lazy imports are deliberate -- ultralytics and insightface are slow and
+#: heavy, and tests that never touch a frame should not pay for them. The cost
+#: is that a server missing them starts perfectly, serves every route, renders
+#: the whole console, and then throws a 500 the first time somebody presses
+#: Register or Check. That is the worst possible moment to find out: after the
+#: form is filled in and the footage is uploaded.
+PIPELINE_REQUIREMENTS = {
+    "cv2": "opencv-python",
+    "torch": "torch",
+    "ultralytics": "ultralytics",
+    "deep_sort_realtime": "deep-sort-realtime",
+    "insightface": "insightface",
+}
+
+
+def missing_pipeline_requirements() -> list[str]:
+    """Pip names of anything the pipeline needs and cannot import."""
+    import importlib.util
+
+    missing = []
+    for module, package in PIPELINE_REQUIREMENTS.items():
+        try:
+            found = importlib.util.find_spec(module) is not None
+        except (ImportError, ValueError):
+            found = False
+        if not found:
+            missing.append(package)
+    return missing
+
+
+def find_project_venv() -> Path | None:
+    """The project's virtualenv interpreter, if there is one and we are not it.
+
+    Returns None when already running inside it, so the "you're using the
+    wrong Python" advice is only given when that is actually the problem.
+    """
+    running = Path(sys.executable).resolve()
+    for root in (BACKEND_ROOT.parent, BACKEND_ROOT):
+        for relative in ("Scripts/python.exe", "bin/python"):
+            candidate = root / ".venv" / relative
+            if candidate.is_file() and candidate.resolve() != running:
+                return candidate
+    return None
+
+
+def report_missing_requirements(missing: list[str]) -> None:
+    """Explain what is missing and, more usefully, why."""
+    venv = find_project_venv()
+
+    lines = [
+        "",
+        "  !! THE PIPELINE CANNOT RUN -- DEPENDENCIES ARE MISSING !!",
+        "",
+        f"  Missing: {', '.join(missing)}",
+        f"  Running: {sys.executable}",
+    ]
+
+    if venv is not None:
+        # Nearly always the real cause: the server was started with the system
+        # interpreter while the dependencies live in the project venv. Saying
+        # "pip install X" here would be actively harmful -- it would install
+        # into the wrong environment and quietly abandon the venv for good.
+        lines += [
+            f"  Project venv: {venv}",
+            "",
+            "  That venv is probably the one you want -- you are not using it.",
+            "  Start the server with it instead:",
+            "",
+            f"    {venv} scripts/serve.py --demo",
+        ]
+    else:
+        lines += [
+            "",
+            "  Install them into this interpreter:",
+            "",
+            f"    {sys.executable} -m pip install -r requirements.txt",
+        ]
+
+    lines += [
+        "",
+        "  Refusing to start. Without these the server would come up fine and",
+        "  then fail with a 500 the moment you pressed Register or Check --",
+        "  after filling in the form and uploading the footage.",
+        "",
+    ]
+    for line in lines:
+        print(line)
+
+
 def import_enrollments(args) -> int:
     """Copy file-based enrollments (phase 2) into the database (phase 7)."""
     settings = get_settings()
@@ -115,6 +207,14 @@ def serve(args) -> int:
     setup_logging(settings.logging.level)
 
     apply_demo_environment(args.demo)
+
+    # Before anything else: the pipeline's dependencies are imported lazily,
+    # so this is the last point at which their absence can be reported as a
+    # startup failure rather than as a 500 mid-registration.
+    missing = missing_pipeline_requirements()
+    if missing:
+        report_missing_requirements(missing)
+        return 1
 
     if not os.environ.get(TEMPLATE_KEY_ENV) and not os.environ.get(ALLOW_PLAINTEXT_ENV):
         # This used to say enrolment "will be stored unencrypted" -- true
