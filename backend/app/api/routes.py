@@ -76,10 +76,19 @@ class PersonOut(BaseModel):
     #: Whether there is an enrolment photo to show. A flag, not the bytes:
     #: a watchlist of two hundred people is not two hundred inline JPEGs.
     has_reference: bool = False
+    #: How many match decisions name this person.
+    #:
+    #: Sent so the console can tell, before offering the button, that this
+    #: record can only have its biometrics erased rather than be deleted
+    #: outright. Without it the only way to find out was to type the person's
+    #: ID into an irreversible-looking confirmation and receive a 409 --
+    #: which teaches people that the scary dialog is usually bluffing.
+    decision_count: int = 0
 
     @classmethod
-    def of(cls, person: Person) -> "PersonOut":
+    def of(cls, person: Person, decision_count: int = 0) -> "PersonOut":
         return cls(
+            decision_count=decision_count,
             person_id=person.person_id,
             display_name=person.display_name,
             notes=person.notes,
@@ -102,8 +111,16 @@ class PersonOut(BaseModel):
 
 
 class PersonUpdate(BaseModel):
-    display_name: str | None = None
-    notes: str | None = None
+    """Descriptive fields only. `person_id` is deliberately absent.
+
+    It is the identity every match decision was filed under, so renaming it
+    would silently detach a person from their own history. Bounds match the
+    enrolment form's: without them an edit could blank a name that registration
+    insisted on, leaving a record nobody can recognise in a review queue.
+    """
+
+    display_name: str | None = Field(None, min_length=1, max_length=200)
+    notes: str | None = Field(None, max_length=2000)
 
 
 class DecisionOut(BaseModel):
@@ -270,7 +287,12 @@ def list_watchlist(
     operator: CurrentOperator,
     include_retired: bool = Query(False, description="Include retired entries."),
 ) -> list[PersonOut]:
-    return [PersonOut.of(p) for p in repo.list_people(include_retired=include_retired)]
+    # Counts fetched in one grouped query, not one per row.
+    counts = repo.decision_counts()
+    return [
+        PersonOut.of(p, decision_count=counts.get(p.id, 0))
+        for p in repo.list_people(include_retired=include_retired)
+    ]
 
 
 @router.get("/watchlist/{person_id}", response_model=PersonOut, tags=["watchlist"])
@@ -278,7 +300,7 @@ def get_person(person_id: str, repo: Repo, operator: CurrentOperator) -> PersonO
     person = repo.get_person(person_id)
     if person is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"No such person: {person_id}")
-    return PersonOut.of(person)
+    return PersonOut.of(person, decision_count=repo.decision_count(person_id))
 
 
 @router.patch("/watchlist/{person_id}", response_model=PersonOut, tags=["watchlist"])
@@ -301,7 +323,7 @@ def update_person(
         detail=payload.model_dump(exclude_none=True),
     )
     repo.session.commit()
-    return PersonOut.of(person)
+    return PersonOut.of(person, decision_count=repo.decision_count(person_id))
 
 
 @router.delete("/watchlist/{person_id}", tags=["watchlist"])
@@ -309,7 +331,8 @@ def retire_person(person_id: str, repo: Repo, operator: CurrentOperator) -> dict
     """Retire, not delete.
 
     Match decisions reference this person; removing the row would make past
-    decisions unreviewable.
+    decisions unreviewable. Reversible -- see `restore_person`. For destroying
+    the biometrics themselves, see `erase_biometrics`.
     """
     if not repo.retire(person_id, actor=operator.username):
         raise HTTPException(
@@ -317,6 +340,61 @@ def retire_person(person_id: str, repo: Repo, operator: CurrentOperator) -> dict
             f"No active watchlist entry for {person_id}",
         )
     return {"person_id": person_id, "retired": True}
+
+
+@router.post("/watchlist/{person_id}/restore", tags=["watchlist"])
+def restore_person(person_id: str, repo: Repo, operator: CurrentOperator) -> dict:
+    """Put a retired person back on the active watchlist.
+
+    Retiring used to be a one-way door: a mis-click took someone off the list
+    and the only way back was re-enrolling them from footage that may no longer
+    exist. Retirement destroys nothing, so undoing it rebuilds nothing.
+    """
+    if not repo.restore(person_id, actor=operator.username):
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            f"No retired watchlist entry for {person_id}",
+        )
+    return {"person_id": person_id, "retired": False}
+
+
+@router.delete("/watchlist/{person_id}/biometrics", tags=["watchlist"])
+def erase_biometrics(person_id: str, repo: Repo, operator: CurrentOperator) -> dict:
+    """Destroy this person's templates and enrolment photo. Irreversible.
+
+    The record and its match decisions survive, so past identifications stay
+    reviewable; the biometric data does not, so the person can never be matched
+    again. This is what an erasure request actually asks for, and it is a
+    different act from retiring them -- retirement is a filing decision, this
+    is destruction.
+    """
+    if repo.get_person(person_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"No such person: {person_id}")
+
+    destroyed = repo.erase_biometrics(person_id, actor=operator.username)
+    return {
+        "person_id": person_id,
+        "templates_destroyed": destroyed,
+        "erased": True,
+    }
+
+
+@router.delete("/watchlist/{person_id}/permanently", tags=["watchlist"])
+def delete_person(person_id: str, repo: Repo, operator: CurrentOperator) -> dict:
+    """Remove the record outright. Refused once anyone has been matched to it.
+
+    409 rather than a silent partial delete: `MatchDecision.person_pk` has no
+    cascade, so removing the row underneath live decisions leaves a review
+    queue pointing at nobody. The response says so and names the alternative.
+    """
+    if repo.get_person(person_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"No such person: {person_id}")
+
+    try:
+        repo.delete_permanently(person_id, actor=operator.username)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+    return {"person_id": person_id, "deleted": True}
 
 
 # -- decisions -------------------------------------------------------------

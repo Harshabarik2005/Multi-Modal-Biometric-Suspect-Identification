@@ -674,9 +674,21 @@ label.checkbox input {
 
 .record-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  /* 250px, not the original 190px: the cards now carry an action row, and at
+     190px five controls wrapped into a ragged stack that read as five separate
+     decisions rather than one set. */
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
   gap: 14px;
 }
+
+.record-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  flex-wrap: wrap;
+  margin-bottom: 18px;
+}
+.record-toolbar input[type='text'] { max-width: 320px; }
 .record {
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
@@ -688,6 +700,91 @@ label.checkbox input {
 .record-body h3 { font-size: 0.9375rem; margin-bottom: 1px; }
 .record-id { font-size: 0.75rem; color: var(--ink-3); margin-bottom: 8px; }
 .record-signals { margin-top: 8px; }
+
+/* A retired record is still a record. Faded rather than hidden, because
+   someone searching for a person needs to find out that they were taken off
+   the list -- "no results" would read as "never registered". */
+.record-retired { background: var(--paper-2); border-style: dashed; }
+.record-retired .record-body > h3,
+.record-retired .record-signals { opacity: 0.6; }
+
+.record-flag {
+  font-size: 0.75rem;
+  color: var(--ink-2);
+  border-left: 2px solid var(--line-2);
+  padding-left: 8px;
+  margin: 6px 0 2px;
+}
+
+.record-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.record-edit {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+.record-edit textarea { min-height: 0; }
+
+/* Destruction is marked by weight and wording, not by colour.
+   The palette is deliberately monochrome -- see the note on .btn-primary --
+   and a red button would be the only hue on the screen, doing exactly the kind
+   of pre-judging the rest of the interface avoids. What actually guards these
+   is the dialog: irreversible actions require the person's ID to be typed,
+   which no colour can substitute for. */
+.btn-danger-quiet {
+  border-style: dashed;
+  border-color: var(--ink-3);
+  color: var(--ink);
+}
+.btn-danger-quiet:hover:not(:disabled) {
+  border-style: solid;
+  border-color: var(--ink);
+  background: var(--paper-3);
+}
+
+.btn-danger {
+  background: var(--ink);
+  color: var(--paper);
+  border-color: var(--ink);
+}
+.btn-danger:hover:not(:disabled) { background: #000; }
+
+/* --- confirmation dialog --------------------------------------------------- */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(17, 17, 17, 0.42);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  z-index: 50;
+}
+
+.modal {
+  background: var(--paper);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.18);
+  padding: 22px 24px 20px;
+  width: 100%;
+  max-width: 440px;
+  /* A long body on a short window must scroll inside the dialog rather than
+     pushing its own buttons off screen. */
+  max-height: calc(100vh - 40px);
+  overflow-y: auto;
+  text-align: left;
+}
+.modal h3 { font-size: 1rem; margin-bottom: 10px; }
+.modal p { color: var(--ink-2); line-height: 1.55; }
 
 /* --- progress ------------------------------------------------------------- */
 

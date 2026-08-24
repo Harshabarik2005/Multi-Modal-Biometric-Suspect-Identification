@@ -12,7 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.core.types import Modality, ModalityEmbedding, l2_normalize
-from app.db.models import DecisionStatus
+from app.db.models import DecisionStatus, Template
 from app.db.repository import (
     WatchlistRepository,
     create_schema,
@@ -156,6 +156,140 @@ class TestRetirement:
         assert not repo.retire("ravi")
 
 
+class TestRestore:
+    """Retiring without an undo was a one-way door."""
+
+    def test_a_retired_person_can_be_put_back(self, repo) -> None:
+        enroll(repo)
+        repo.retire("ravi")
+        assert repo.restore("ravi", actor="alice")
+
+        person = repo.get_person("ravi")
+        assert person.is_active
+        assert person.retired_at is None
+
+    def test_restoring_brings_them_back_into_the_gallery(self, repo) -> None:
+        """The point of the undo: they can be matched against again."""
+        enroll(repo)
+        repo.retire("ravi")
+        assert len(repo.load_gallery()) == 0
+        repo.restore("ravi")
+        assert len(repo.load_gallery()) == 1
+
+    def test_restoring_keeps_the_templates_that_were_never_destroyed(self, repo) -> None:
+        enroll(repo)
+        before = len(repo.get_person("ravi").templates)
+        repo.retire("ravi")
+        repo.restore("ravi")
+        assert len(repo.get_person("ravi").templates) == before
+
+    def test_restoring_someone_active_reports_no_change(self, repo) -> None:
+        enroll(repo)
+        assert not repo.restore("ravi")
+
+    def test_restoring_writes_an_audit_event(self, repo) -> None:
+        enroll(repo)
+        repo.retire("ravi")
+        repo.restore("ravi", actor="alice")
+        assert any(
+            e.kind == "restore" and e.actor == "alice" and e.subject == "ravi"
+            for e in repo.audit_trail()
+        )
+
+
+class TestErasingBiometrics:
+    """Destruction, as distinct from retirement.
+
+    Retiring is a filing decision and reversible. This destroys the templates
+    and the enrolment photograph and cannot be undone -- while keeping the row
+    and its decisions, so what the system did to this person stays reviewable.
+    """
+
+    def test_templates_and_photo_are_destroyed(self, repo) -> None:
+        enroll(repo, reference_jpeg=b"pretend-jpeg-bytes")
+        assert repo.get_person("ravi").reference_jpeg is not None
+
+        destroyed = repo.erase_biometrics("ravi", actor="alice")
+
+        person = repo.get_person("ravi")
+        assert destroyed == 2
+        assert person.templates == []
+        assert person.reference_jpeg is None, (
+            "the enrolment photograph is a picture of them stored beside the "
+            "vectors; leaving it makes 'erased' a lie"
+        )
+
+    def test_the_record_and_its_decisions_survive(self, repo) -> None:
+        enroll(repo)
+        repo.record_match("ravi", track_id=1, score=0.9)
+        repo.erase_biometrics("ravi")
+
+        assert repo.get_person("ravi") is not None
+        assert len(repo.decisions_for("ravi")) == 1, (
+            "erasing biometrics must not destroy the record of what the system "
+            "already decided about this person"
+        )
+
+    def test_they_can_no_longer_be_matched(self, repo) -> None:
+        enroll(repo)
+        repo.erase_biometrics("ravi")
+        gallery = repo.load_gallery()
+        assert gallery.get("ravi") is None or len(gallery.get("ravi").embeddings) == 0
+
+    def test_erasing_writes_an_audit_event(self, repo) -> None:
+        enroll(repo)
+        repo.erase_biometrics("ravi", actor="alice")
+        assert any(
+            e.kind == "erase_biometrics" and e.actor == "alice"
+            for e in repo.audit_trail()
+        )
+
+    def test_erasing_an_unknown_person_destroys_nothing(self, repo) -> None:
+        assert repo.erase_biometrics("nobody") == 0
+
+
+class TestPermanentDeletion:
+    """Allowed only while it is safe -- refused the moment it is not."""
+
+    def test_an_unmatched_person_can_be_deleted_outright(self, repo) -> None:
+        enroll(repo)
+        assert repo.delete_permanently("ravi", actor="alice")
+        assert repo.get_person("ravi") is None
+
+    def test_deleting_takes_the_templates_with_it(self, repo) -> None:
+        enroll(repo)
+        repo.delete_permanently("ravi")
+        assert repo.session.query(Template).count() == 0
+
+    def test_deletion_is_refused_once_someone_has_been_matched(self, repo) -> None:
+        """`MatchDecision.person_pk` has no cascade, so this would leave the
+        review queue pointing at nobody."""
+        enroll(repo)
+        repo.record_match("ravi", track_id=1, score=0.9)
+
+        with pytest.raises(ValueError, match="match decision"):
+            repo.delete_permanently("ravi")
+
+        assert repo.get_person("ravi") is not None, "the refusal must be total"
+        assert len(repo.decisions_for("ravi")) == 1
+
+    def test_the_refusal_names_the_alternative(self, repo) -> None:
+        """A dead end is not an answer; erasure is what they actually want."""
+        enroll(repo)
+        repo.record_match("ravi", track_id=1, score=0.9)
+        with pytest.raises(ValueError, match="[Ee]rase their biometrics"):
+            repo.delete_permanently("ravi")
+
+    def test_deleting_an_unknown_person_reports_no_change(self, repo) -> None:
+        assert not repo.delete_permanently("nobody")
+
+    def test_decision_count_drives_the_decision(self, repo) -> None:
+        enroll(repo)
+        assert repo.decision_count("ravi") == 0
+        repo.record_match("ravi", track_id=1, score=0.9)
+        assert repo.decision_count("ravi") == 1
+
+
 class TestHumanConfirmation:
     """Section 8: no automated action on a match alone."""
 
@@ -280,6 +414,65 @@ class TestAPI:
         assert client.delete("/api/watchlist/ravi").status_code == 200
         assert client.get("/api/watchlist").json() == []
         assert len(client.get("/api/watchlist?include_retired=true").json()) == 1
+
+    def test_restore_puts_a_retired_person_back(self, client) -> None:
+        self._enroll(client)
+        client.delete("/api/watchlist/ravi")
+        assert client.get("/api/watchlist").json() == []
+
+        assert client.post("/api/watchlist/ravi/restore").status_code == 200
+        assert len(client.get("/api/watchlist").json()) == 1
+
+    def test_restoring_someone_active_is_a_404(self, client) -> None:
+        self._enroll(client)
+        assert client.post("/api/watchlist/ravi/restore").status_code == 404
+
+    def test_erasing_biometrics_empties_the_record_but_keeps_it(self, client) -> None:
+        self._enroll(client)
+        response = client.delete("/api/watchlist/ravi/biometrics")
+        assert response.status_code == 200
+        assert response.json()["templates_destroyed"] == 2
+
+        person = client.get("/api/watchlist/ravi").json()
+        assert person["templates"] == []
+        assert person["has_reference"] is False
+
+    def test_erasing_an_unknown_person_is_a_404(self, client) -> None:
+        assert client.delete("/api/watchlist/nobody/biometrics").status_code == 404
+
+    def test_an_unmatched_person_can_be_deleted_permanently(self, client) -> None:
+        self._enroll(client)
+        assert client.delete("/api/watchlist/ravi/permanently").status_code == 200
+        assert client.get("/api/watchlist?include_retired=true").json() == []
+
+    def test_deleting_someone_with_decisions_is_a_409(self, client) -> None:
+        """Not a 500 and not a silent partial delete: the review queue would be
+        left pointing at nobody."""
+        self._enroll(client)
+        session = session_factory(client.engine)()
+        WatchlistRepository(session).record_match("ravi", track_id=1, score=0.9)
+        session.close()
+
+        response = client.delete("/api/watchlist/ravi/permanently")
+        assert response.status_code == 409
+        assert "erase their biometrics" in response.json()["detail"].lower()
+        assert len(client.get("/api/watchlist").json()) == 1
+
+    def test_editing_cannot_blank_a_name(self, client) -> None:
+        """Registration insists on a name; editing must not undo that and
+        leave a record nobody can recognise in a review queue."""
+        self._enroll(client)
+        assert client.patch(
+            "/api/watchlist/ravi", json={"display_name": ""}
+        ).status_code == 422
+        assert client.get("/api/watchlist/ravi").json()["display_name"] == "Ravi Kumar"
+
+    def test_person_id_cannot_be_edited(self, client) -> None:
+        """It is the identity every decision was filed under."""
+        self._enroll(client)
+        client.patch("/api/watchlist/ravi", json={"person_id": "someone-else"})
+        assert client.get("/api/watchlist/ravi").status_code == 200
+        assert client.get("/api/watchlist/someone-else").status_code == 404
 
     def test_review_requires_a_valid_verdict(self, client) -> None:
         """There is no route that confirms a match without a human verdict."""

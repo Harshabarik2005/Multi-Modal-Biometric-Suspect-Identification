@@ -105,8 +105,41 @@ export const api = {
       body: JSON.stringify(payload),
     }),
 
+  /**
+   * Take someone off the active watchlist, reversibly.
+   *
+   * Not a delete: their match decisions still name them, and removing the
+   * record would leave that history pointing at nobody. `restorePerson` undoes
+   * it exactly, because nothing was destroyed.
+   */
   retirePerson: (personId) =>
     request(`/watchlist/${encodeURIComponent(personId)}`, { method: 'DELETE' }),
+
+  restorePerson: (personId) =>
+    request(`/watchlist/${encodeURIComponent(personId)}/restore`, {
+      method: 'POST',
+    }),
+
+  /**
+   * Destroy the templates and the enrolment photograph. Irreversible.
+   *
+   * The record and its decisions survive, so what the system already decided
+   * about this person stays reviewable; the biometrics do not, so they can
+   * never be matched again. This is the one that answers an erasure request.
+   */
+  eraseBiometrics: (personId) =>
+    request(`/watchlist/${encodeURIComponent(personId)}/biometrics`, {
+      method: 'DELETE',
+    }),
+
+  /**
+   * Remove the record outright. The server refuses with 409 once anyone has
+   * been matched against it, and says so in the detail.
+   */
+  deletePerson: (personId) =>
+    request(`/watchlist/${encodeURIComponent(personId)}/permanently`, {
+      method: 'DELETE',
+    }),
 
   decisions: (pendingOnly = true, limit = 100) =>
     request(`/decisions?pending_only=${pendingOnly}&limit=${limit}`),

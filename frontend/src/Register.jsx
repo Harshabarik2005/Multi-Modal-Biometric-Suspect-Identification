@@ -486,11 +486,17 @@ function CaptureSection({ section, index, state, setState, onError, busy }) {
 
 /* -------------------------------------------------------------------- page */
 
-export default function Register({ onError, onRegistered }) {
-  const [personId, setPersonId] = useState('')
-  const [displayName, setDisplayName] = useState('')
-  const [notes, setNotes] = useState('')
-  const [replace, setReplace] = useState(false)
+/**
+ * @param prefill  When Records sends someone here to have their footage
+ *   re-recorded: their existing identity, with `replace` already on. The ID is
+ *   locked in that case -- the whole point is to overwrite THIS record, and a
+ *   typo in the field would quietly enrol a second person instead.
+ */
+export default function Register({ onError, onRegistered, prefill = null }) {
+  const [personId, setPersonId] = useState(prefill?.person_id || '')
+  const [displayName, setDisplayName] = useState(prefill?.display_name || '')
+  const [notes, setNotes] = useState(prefill?.notes || '')
+  const [replace, setReplace] = useState(Boolean(prefill))
   const [sections, setSections] = useState(initialSections)
 
   const [job, setJob] = useState(null)
@@ -504,10 +510,13 @@ export default function Register({ onError, onRegistered }) {
   )
 
   const reset = () => {
-    setPersonId('')
-    setDisplayName('')
-    setNotes('')
-    setReplace(false)
+    // Back to the prefilled identity rather than to blank, when there is one:
+    // clearing the form mid-update should not turn an overwrite into a new
+    // registration without saying so.
+    setPersonId(prefill?.person_id || '')
+    setDisplayName(prefill?.display_name || '')
+    setNotes(prefill?.notes || '')
+    setReplace(Boolean(prefill))
     setSections(initialSections())
   }
 
@@ -554,13 +563,22 @@ export default function Register({ onError, onRegistered }) {
   return (
     <form className="division" onSubmit={submit}>
       <div className="division-head">
-        <h2>Register a person</h2>
+        <h2>{prefill ? 'Update stored footage' : 'Register a person'}</h2>
         <p>
           Record each signal separately. You do not have to provide all three,
           but a record missing a signal simply cannot match on it later — and
           you will not find that out at the moment it matters.
         </p>
       </div>
+
+      {prefill && (
+        <p className="caution">
+          <strong>Overwriting {prefill.display_name}.</strong> Whatever you
+          record here replaces their stored signals entirely — signals you do
+          not supply this time are lost, not kept from before. Past decisions
+          about them are unaffected.
+        </p>
+      )}
 
       <div className="card">
         <div className="card-title-rule">Identity</div>
@@ -585,7 +603,8 @@ export default function Register({ onError, onRegistered }) {
               onChange={(event) => setPersonId(event.target.value)}
               placeholder="case-2291"
               className="mono"
-              disabled={busy}
+              disabled={busy || Boolean(prefill)}
+              readOnly={Boolean(prefill)}
             />
           </label>
         </div>
@@ -607,7 +626,7 @@ export default function Register({ onError, onRegistered }) {
             type="checkbox"
             checked={replace}
             onChange={(event) => setReplace(event.target.checked)}
-            disabled={busy}
+            disabled={busy || Boolean(prefill)}
           />
           <span>
             Replace an existing record with this ID. Their stored signals are
@@ -704,8 +723,12 @@ export default function Register({ onError, onRegistered }) {
         </button>
         <button className="btn btn-primary" type="submit" disabled={busy}>
           {busy
-            ? 'Registering…'
-            : `Register${allFiles.length ? ` — ${allFiles.length} file(s)` : ''}`}
+            ? prefill
+              ? 'Updating…'
+              : 'Registering…'
+            : `${prefill ? 'Replace stored footage' : 'Register'}${
+                allFiles.length ? ` — ${allFiles.length} file(s)` : ''
+              }`}
         </button>
       </div>
     </form>

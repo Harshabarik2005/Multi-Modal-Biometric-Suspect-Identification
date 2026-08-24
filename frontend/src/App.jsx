@@ -426,6 +426,11 @@ export default function App() {
   // Bumped to force the records and queue to refetch after a registration or
   // a search, so no tab shows a stale list.
   const [version, setVersion] = useState(0)
+  // Set when Records sends someone to Register to have their footage
+  // re-recorded. Held here rather than in Register because the handoff crosses
+  // a tab boundary, and cleared on any manual tab change so the overwrite
+  // banner cannot outlive the intent that raised it.
+  const [replacing, setReplacing] = useState(null)
 
   const onError = useCallback((message) => setError(message), [])
 
@@ -524,7 +529,13 @@ export default function App() {
           <button
             key={entry.id}
             className={`tab ${tab === entry.id ? 'active' : ''}`}
-            onClick={() => setTab(entry.id)}
+            onClick={() => {
+              // Clicking a tab is a fresh intent. Leaving `replacing` set
+              // would put someone back on the Register tab later still
+              // primed to overwrite a record they had stopped thinking about.
+              setReplacing(null)
+              setTab(entry.id)
+            }}
           >
             {entry.label}
             {entry.id === 'review' && stats?.pending_decisions > 0 && (
@@ -552,8 +563,29 @@ export default function App() {
       )}
 
       <main>
-        {tab === 'register' && <Register onError={onError} onRegistered={bump} />}
-        {tab === 'records' && <Records key={version} onError={onError} />}
+        {tab === 'register' && (
+          <Register
+            // Remounts when the target changes, so the form re-initialises
+            // from the new identity rather than holding the previous one.
+            key={replacing ? `replace-${replacing.person_id}` : 'new'}
+            onError={onError}
+            onRegistered={() => {
+              setReplacing(null)
+              bump()
+            }}
+            prefill={replacing}
+          />
+        )}
+        {tab === 'records' && (
+          <Records
+            key={version}
+            onError={onError}
+            onReplaceFootage={(person) => {
+              setReplacing(person)
+              setTab('register')
+            }}
+          />
+        )}
         {tab === 'identify' && <Identify onError={onError} onScanned={bump} />}
         {tab === 'review' && (
           <ReviewQueue

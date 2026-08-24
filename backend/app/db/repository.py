@@ -294,6 +294,123 @@ class WatchlistRepository:
         self.session.commit()
         return True
 
+    def restore(self, person_id: str, actor: str = "system") -> bool:
+        """Put a retired person back on the active watchlist.
+
+        Retiring without this was a one-way door: a mis-click took someone off
+        the list and the only route back was re-enrolling them from footage
+        that may no longer exist. Nothing was destroyed by the retirement, so
+        nothing needs rebuilding to undo it.
+        """
+        person = self.get_person(person_id)
+        if person is None or person.retired_at is None:
+            return False
+        person.retired_at = None
+        self.log("restore", actor=actor, subject=person_id)
+        self.session.commit()
+        return True
+
+    def decision_count(self, person_id: str) -> int:
+        """How many match decisions name this person.
+
+        The number that decides whether they can be deleted outright or only
+        have their biometrics erased.
+        """
+        person = self.get_person(person_id)
+        if person is None:
+            return 0
+        return int(
+            self.session.scalar(
+                select(func.count())
+                .select_from(MatchDecision)
+                .where(MatchDecision.person_pk == person.id)
+            )
+            or 0
+        )
+
+    def decision_counts(self) -> dict[int, int]:
+        """Decisions per person primary key, for the whole watchlist at once.
+
+        One grouped query rather than a count per person. The watchlist view
+        needs this for every row it renders -- to tell a record that can be
+        deleted from one that can only have its biometrics erased -- and
+        reaching through `person.decisions` there would issue a query per
+        person on a page whose whole job is to list all of them.
+        """
+        rows = self.session.execute(
+            select(MatchDecision.person_pk, func.count())
+            .group_by(MatchDecision.person_pk)
+        )
+        return {pk: int(count) for pk, count in rows}
+
+    def erase_biometrics(self, person_id: str, actor: str = "system") -> int:
+        """Destroy this person's templates and enrolment photo. Irreversible.
+
+        The row survives, and so does every decision that referenced it, so
+        past identifications stay reviewable -- a reviewer opening an old
+        decision still sees who it named and on what evidence. What is gone is
+        the biometric data itself: after this they cannot be matched against
+        again, because there is nothing left to match.
+
+        This is what an erasure request actually asks for. Deleting the row
+        instead would satisfy nobody: it destroys the audit trail as
+        collateral, which is the record of what the system did to that person.
+
+        Returns how many templates were destroyed.
+        """
+        person = self.get_person(person_id)
+        if person is None:
+            return 0
+
+        destroyed = len(person.templates)
+        person.templates.clear()
+        person.reference_jpeg = None
+        # Not a template, but it is a photograph of them and it is stored
+        # beside the vectors. Leaving it behind would make "erased" a lie.
+        self.log(
+            "erase_biometrics",
+            actor=actor,
+            subject=person_id,
+            detail={"templates_destroyed": destroyed},
+        )
+        self.session.commit()
+        return destroyed
+
+    def delete_permanently(self, person_id: str, actor: str = "system") -> bool:
+        """Remove the row entirely. Only safe when no decision references it.
+
+        Raises ValueError when decisions exist. That is not caution for its own
+        sake: `MatchDecision.person_pk` is a foreign key with no cascade, so
+        deleting underneath it either fails outright or leaves decisions
+        pointing at nothing, depending on whether the database is enforcing
+        the constraint. A review queue full of matches against a missing person
+        is worse than either outcome. `erase_biometrics` is the answer there.
+        """
+        person = self.get_person(person_id)
+        if person is None:
+            return False
+
+        decisions = self.decision_count(person_id)
+        if decisions:
+            raise ValueError(
+                f"{person_id} is named in {decisions} match decision(s). "
+                "Deleting the record would leave those decisions pointing at "
+                "nobody. Erase their biometrics instead -- that destroys the "
+                "templates and the enrolment photo while keeping the decisions "
+                "reviewable."
+            )
+
+        # Templates go with it: the relationship cascades delete-orphan.
+        self.log(
+            "delete",
+            actor=actor,
+            subject=person_id,
+            detail={"display_name": person.display_name},
+        )
+        self.session.delete(person)
+        self.session.commit()
+        return True
+
     def to_record(self, person: Person) -> PersonRecord:
         embeddings: dict[Modality, ModalityEmbedding] = {}
         for template in person.templates:
