@@ -399,8 +399,11 @@ class GaitEmbedder(EmbeddingBranch):
         * **Cycle count** -- one cycle is the bare minimum; two or more is a
           much more stable average.
         * **Silhouette cleanliness** -- the fraction of frames where the body
-          was fully in view. Clipped bodies normalise to the wrong height, so
-          their shape is misleading rather than merely noisy.
+          was fully in view. A body running off the top or bottom of the frame
+          normalises to the wrong height; one running off the side has a
+          truncated width, which is the very quantity the cadence signal is
+          read from. Either way the shape is misleading rather than merely
+          noisy, so these are downweighted rather than averaged in as equals.
         """
         if not silhouettes:
             return 0.0

@@ -205,9 +205,19 @@ class SilhouetteExtractor:
             if normalised is None:
                 continue
 
-            # A mask touching the top or bottom edge means the body is cut off,
-            # so its height normalisation is wrong and its shape misleading.
-            clipped = bool(mask[0].any() or mask[-1].any())
+            # Whether the body is cut off, as measured against the FRAME when
+            # the crop was taken.
+            #
+            # This used to be `mask[0].any() or mask[-1].any()` -- the mask
+            # touching the top or bottom row of its own crop. But the crop is
+            # the detection box, drawn tight around the person with no padding,
+            # so a mask that agrees with the detector reaches both rows
+            # whenever the whole body is visible. The test fired on the healthy
+            # case. Measured on a clip where not one box came within 3px of the
+            # frame edge, it reported 89% of frames clipped, and since
+            # `unclipped` multiplies into gait quality that alone held quality
+            # near a tenth of its real value.
+            clipped = bool(observation.at_frame_edge)
 
             silhouettes.append(
                 Silhouette(

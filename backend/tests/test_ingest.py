@@ -483,3 +483,163 @@ class TestMultipleVideos:
 
         summary = MediaSummary(images=5, observations=5)
         assert gait_observations([1, 2, 3, 4, 5], summary) == []
+
+
+class TestUploadsKeepTheRealFrameRate:
+    """Renumbering the uploads must not rewrite how fast they were shot.
+
+    Frame indices are counters and may be renumbered freely. Timestamps are
+    not: they are the only record of the capture rate, and gait recovers
+    cadence from them (LOG-06). This assigned `float(offset + index)` to both,
+    which says one second per frame whatever the camera did. At the resulting
+    1Hz, gait's own resolution check refused every enrolment with "frames too
+    far apart to measure cadence" -- for everybody, on every upload, which is
+    why no watchlist entry ever held a gait template.
+    """
+
+    @staticmethod
+    def _clip(directory: Path, name: str, frames: int = 4) -> Path:
+        """A real file on disk. `observations_from_uploads` classifies by
+        suffix but still needs the path to exist for the caller to stage it."""
+        path = directory / name
+        writer = cv2.VideoWriter(
+            str(path), cv2.VideoWriter_fourcc(*"mp4v"), 10.0, (160, 120)
+        )
+        for index in range(frames):
+            frame = np.zeros((120, 160, 3), dtype=np.uint8)
+            cv2.rectangle(
+                frame, (10 + index, 20), (60 + index, 100), (200, 200, 200), -1
+            )
+            writer.write(frame)
+        writer.release()
+        return path
+
+    @staticmethod
+    def _fake_video(fps: float, count: int):
+        import numpy as np
+
+        from app.api.media import MediaSummary
+        from app.core.types import TrackObservation
+
+        def make(path, settings, pipeline=None):
+            observations = [
+                TrackObservation(
+                    i, i / fps, np.zeros((40, 20, 3), np.uint8), 40.0, 0.9
+                )
+                for i in range(count)
+            ]
+            return observations, MediaSummary(
+                videos=1,
+                observations=count,
+                video_observations=count,
+                longest_video_run=count,
+                has_motion_source=True,
+            )
+
+        return make
+
+    def _run(self, tmp_path, fps, count, names=("a.mp4", "b.mp4")):
+        from unittest.mock import patch
+
+        from app.api.media import observations_from_uploads
+
+        paths = [self._clip(tmp_path, n) for n in names]
+        with patch(
+            "app.api.media.observations_from_video",
+            side_effect=self._fake_video(fps, count),
+        ):
+            return observations_from_uploads(paths, get_settings())
+
+    def test_spacing_within_a_clip_survives_renumbering(self, tmp_path) -> None:
+        import numpy as np
+
+        from app.api.media import gait_observations
+
+        observations, summary = self._run(tmp_path, fps=30.0, count=20)
+        segment = gait_observations(observations, summary)
+        gaps = np.diff([o.timestamp_s for o in segment])
+
+        assert float(np.median(gaps)) == pytest.approx(1 / 30.0, abs=1e-6), (
+            "the clip was shot at 30fps; the segment handed to gait must still "
+            f"say so, not {1 / float(np.median(gaps)):.1f}fps"
+        )
+
+    def test_a_thirty_fps_clip_can_resolve_a_half_cycle(self, tmp_path) -> None:
+        """The gate that was failing, asserted directly."""
+        from app.api.media import gait_observations
+        from app.core.config import get_settings as settings_of
+        from app.embeddings.gait import resample_cadence
+        from app.embeddings.silhouette import Silhouette
+
+        import numpy as np
+
+        observations, summary = self._run(tmp_path, fps=30.0, count=40)
+        segment = gait_observations(observations, summary)
+        silhouettes = [
+            Silhouette(
+                frame_index=o.frame_index,
+                image=np.zeros((64, 44), np.float32),
+                coverage=0.5,
+                clipped=False,
+                timestamp_s=o.timestamp_s,
+            )
+            for o in segment
+        ]
+        cfg = settings_of().gait
+        cadence = resample_cadence(
+            silhouettes, np.zeros(len(silhouettes), np.float32), cfg.assumed_fps
+        )
+
+        assert cadence.rate_hz == pytest.approx(30.0, rel=0.01)
+        assert cadence.resolves(
+            cfg.min_half_period_s, cfg.min_samples_per_half_period
+        ), "a 30fps clip must be able to resolve a half gait cycle"
+
+    def test_timestamps_stay_ordered_across_clips(self, tmp_path) -> None:
+        observations, _ = self._run(tmp_path, fps=30.0, count=20)
+        stamps = [o.timestamp_s for o in observations]
+        assert stamps == sorted(stamps), f"not monotonic: {stamps[:5]}..."
+        assert len(set(stamps)) == len(stamps), "duplicate timestamps"
+
+    def test_photos_land_after_the_footage(self, tmp_path) -> None:
+        """Guards the new offsetting, rather than reproducing an old failure.
+
+        Worth stating plainly: the previous code did NOT get this wrong. It
+        offset photographs by frame index while videos also carried index-as-
+        seconds, so both grew at the same rate and the order held. Keeping the
+        real capture rate makes video timestamps much smaller than their frame
+        count, and an offset still taken from the index would now overshoot in
+        the other direction. Nothing here ever broke -- this is the check that
+        stops the repair breaking it.
+        """
+        from unittest.mock import patch
+
+        import numpy as np
+
+        from app.api.media import MediaSummary, observations_from_uploads
+        from app.core.types import TrackObservation
+
+        def fake_images(paths, settings, detector=None):
+            observations = [
+                TrackObservation(i, 0.0, np.zeros((40, 20, 3), np.uint8), 40.0, 0.9)
+                for i in range(3)
+            ]
+            return observations, MediaSummary(images=3, observations=3)
+
+        video = self._clip(tmp_path, "v.mp4")
+        photo = tmp_path / "p.jpg"
+        cv2.imwrite(str(photo), np.zeros((40, 20, 3), np.uint8))
+
+        with patch(
+            "app.api.media.observations_from_video",
+            side_effect=self._fake_video(30.0, 300),
+        ), patch("app.api.media.observations_from_images", side_effect=fake_images):
+            observations, _ = observations_from_uploads(
+                [video, photo], get_settings()
+            )
+
+        stamps = [o.timestamp_s for o in observations]
+        assert stamps == sorted(stamps), (
+            "photographs must be timestamped after the video they follow, not "
+            "by frame index"
+        )

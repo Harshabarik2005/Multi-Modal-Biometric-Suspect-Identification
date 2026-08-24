@@ -116,6 +116,30 @@ class TestModalityEmbedding:
         with pytest.raises(ValueError):
             face.similarity(gait)
 
+    def test_empty_keeps_the_reason_it_was_given(self) -> None:
+        """`empty()` took a `reason` and used it only as a boolean.
+
+        Every branch writes a precise diagnosis of which gate refused and what
+        it measured, and all of it was discarded at the door -- leaving callers
+        to invent a generic message. Someone whose enrolment stored no gait
+        could not find out whether the footage was too short, too coarsely
+        sampled, or simply not a walk, which is the one moment the answer is
+        worth having.
+        """
+        refused = ModalityEmbedding.empty(
+            Modality.GAIT, reason="frames too far apart to measure cadence"
+        )
+        assert refused.reason == "frames too far apart to measure cadence"
+        assert not refused.has_signal
+
+    def test_a_real_embedding_carries_no_reason(self) -> None:
+        assert ModalityEmbedding(
+            Modality.FACE, np.array([1.0, 0.0], dtype=np.float32), 0.9
+        ).reason == ""
+
+    def test_empty_without_a_reason_is_still_fine(self) -> None:
+        assert ModalityEmbedding.empty(Modality.GAIT).reason == ""
+
 
 class TestPerFrameAggregation:
     def test_reports_no_signal_when_every_frame_fails(self) -> None:

@@ -566,3 +566,117 @@ class TestCadenceIsMeasuredInSeconds:
         assert cadence.rate_hz == 25.0
         assert cadence.coverage == 1.0
         assert cadence.signal.size == 60
+
+
+class TestClippingIsMeasuredAgainstTheFrame:
+    """A silhouette is "clipped" when the BODY is cut off, not when the mask
+    reaches the edge of its own crop.
+
+    The crop is the detection box, drawn tight around the person with no
+    padding, so a mask that agrees with the detector touches its top and bottom
+    rows whenever the whole body is visible. The old test -- `mask[0].any() or
+    mask[-1].any()` -- therefore fired on the healthy case. Measured on a clip
+    where not one detection box came within 3px of the frame edge, it called
+    89% of frames clipped, and since `unclipped` multiplies into gait quality
+    that alone held quality near a tenth of its true value.
+    """
+
+    def test_a_box_inside_the_frame_is_not_clipped(self) -> None:
+        """The regression: a fully visible person, nowhere near an edge."""
+        import numpy as np
+
+        from app.core.track_buffer import TrackBufferStore
+        from app.core.types import FrameResult, Track
+
+        frame = np.zeros((480, 848, 3), dtype=np.uint8)
+        store = TrackBufferStore(get_settings())
+        # Comfortably inside: 40px of headroom, 60px below the feet.
+        store.update(
+            FrameResult(
+                frame_index=0,
+                timestamp_s=0.0,
+                tracks=[Track(track_id=1, x1=300, y1=40, x2=420, y2=420,
+                              confidence=0.9)],
+            ),
+            frame,
+        )
+        observation = list(store.get(1))[0]
+        assert not observation.at_frame_edge
+
+    def test_a_box_running_off_the_bottom_is_clipped(self) -> None:
+        import numpy as np
+
+        from app.core.track_buffer import TrackBufferStore
+        from app.core.types import FrameResult, Track
+
+        frame = np.zeros((480, 848, 3), dtype=np.uint8)
+        store = TrackBufferStore(get_settings())
+        store.update(
+            FrameResult(
+                frame_index=0,
+                timestamp_s=0.0,
+                tracks=[Track(track_id=1, x1=300, y1=40, x2=420, y2=480,
+                              confidence=0.9)],
+            ),
+            frame,
+        )
+        assert list(store.get(1))[0].at_frame_edge
+
+    def test_a_box_running_off_the_side_is_clipped(self) -> None:
+        """Horizontal edges count too, and for gait they matter more.
+
+        The cadence signal is the width of the silhouette's lower third, so a
+        body half out of shot contributes a truncated width at exactly the
+        place the walk is read from. Measured on a clip of someone crossing the
+        frame, 16% of frames were part-way out of shot at entry and exit;
+        excluding them moved periodicity from 0.166 to 0.388.
+        """
+        import numpy as np
+
+        from app.core.track_buffer import TrackBufferStore
+        from app.core.types import FrameResult, Track
+
+        frame = np.zeros((480, 848, 3), dtype=np.uint8)
+        store = TrackBufferStore(get_settings())
+        store.update(
+            FrameResult(
+                frame_index=0,
+                timestamp_s=0.0,
+                tracks=[Track(track_id=1, x1=0, y1=40, x2=120, y2=420,
+                              confidence=0.9)],
+            ),
+            frame,
+        )
+        assert list(store.get(1))[0].at_frame_edge
+
+    def test_the_extractor_takes_clipping_from_the_observation(self) -> None:
+        """Not from the mask, which cannot see the frame it was cut from."""
+        import numpy as np
+
+        from app.core.types import TrackObservation
+        from app.embeddings.silhouette import SilhouetteExtractor
+
+        settings = get_settings()
+        extractor = SilhouetteExtractor(settings, settings.gait)
+
+        # A mask filling its crop edge to edge -- the shape the old test called
+        # clipped every time.
+        full = np.ones((80, 40), dtype=bool)
+        extractor.masks_for = lambda crop: full  # type: ignore[assignment]
+
+        def observe(at_edge: bool) -> TrackObservation:
+            return TrackObservation(
+                frame_index=0,
+                timestamp_s=0.0,
+                crop=np.zeros((80, 40, 3), np.uint8),
+                box_height=80.0,
+                detection_confidence=0.9,
+                at_frame_edge=at_edge,
+            )
+
+        inside = extractor.extract([observe(False)])
+        at_edge = extractor.extract([observe(True)])
+        assert inside and not inside[0].clipped, (
+            "a mask filling its own box is the normal case, not a cut-off body"
+        )
+        assert at_edge and at_edge[0].clipped

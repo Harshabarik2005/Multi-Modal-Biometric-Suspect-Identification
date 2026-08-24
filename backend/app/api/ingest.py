@@ -324,6 +324,17 @@ async def enroll(
             stored: list[str] = []
             skipped: list[dict[str, str]] = []
 
+            def why(embedding, fallback: str) -> str:
+                """The branch's own account of why it found nothing.
+
+                Each branch already writes a specific diagnosis -- which gate
+                refused, and what it measured. Preferring it to a generic line
+                here is the difference between "no gait signal" and "frames too
+                far apart to measure cadence", and only one of those tells
+                somebody what to change about their footage.
+                """
+                return embedding.reason or fallback
+
             reporter.stage("reading the face")
             from app.embeddings.face import FaceEmbedder
 
@@ -334,7 +345,9 @@ async def enroll(
             else:
                 skipped.append({
                     "modality": "face",
-                    "reason": "no usable face found -- is it visible and frontal?",
+                    "reason": why(
+                        face, "no usable face found -- is it visible and frontal?"
+                    ),
                 })
 
             reporter.stage("reading gait")
@@ -352,9 +365,10 @@ async def enroll(
                 else:
                     skipped.append({
                         "modality": "gait",
-                        "reason": (
+                        "reason": why(
+                            gait,
                             "no gait signal -- the subject has to be WALKING "
-                            "through several full step cycles"
+                            "through several full step cycles",
                         ),
                     })
             else:
@@ -373,7 +387,9 @@ async def enroll(
             else:
                 skipped.append({
                     "modality": "reid",
-                    "reason": "no usable body crop -- too small, or odd box shape",
+                    "reason": why(
+                        reid, "no usable body crop -- too small, or odd box shape"
+                    ),
                 })
 
             if not embeddings:

@@ -141,6 +141,16 @@ class ModalityEmbedding:
     # means unknown, which is the case for anything enrolled before this
     # existed.
     model_id: str = ""
+    #: Why there is no vector, in words. Empty when there is one.
+    #:
+    #: `empty()` has always taken a `reason`, and until now used it only as a
+    #: boolean before discarding the text. Every branch was writing a precise
+    #: diagnosis -- "frames too far apart to measure cadence", "legs barely
+    #: move; person is not walking" -- and every one of them was thrown away,
+    #: leaving callers to invent a generic message of their own. Someone whose
+    #: enrolment stored no gait had no way to find out which gate refused it,
+    #: which is exactly the moment the answer matters most.
+    reason: str = ""
 
     @property
     def has_signal(self) -> bool:
@@ -148,13 +158,14 @@ class ModalityEmbedding:
 
     @classmethod
     def empty(cls, modality: Modality, reason: str = "") -> "ModalityEmbedding":
-        """A clean 'nothing to report' result."""
+        """A clean 'nothing to report' result, and why."""
         return cls(
             modality=modality,
             vector=None,
             quality=0.0,
             frames_used=0,
             detail={"no_signal": 1.0} if reason else {},
+            reason=reason,
         )
 
     def similarity(self, other: "ModalityEmbedding") -> float | None:
@@ -187,6 +198,18 @@ class TrackObservation:
     crop: np.ndarray
     box_height: float
     detection_confidence: float
+    #: True when the detection box ran into any edge of the frame, so the body
+    #: is cut off and the crop holds part of a person presented as a whole one.
+    #:
+    #: Recorded here because this is the only place it can be known: `crop` is
+    #: the box, so by the time a branch has one, the frame it was cut from is
+    #: gone. Gait used to infer it by testing whether the silhouette mask
+    #: touched the top or bottom row of its own crop -- but the crop *is* the
+    #: box, drawn tight around the person, so a fully visible body touches both
+    #: by construction. Measured on a clip where no box came within 3px of the
+    #: frame edge, that test called 89% of frames clipped and cut gait quality
+    #: roughly tenfold.
+    at_frame_edge: bool = False
 
 
 def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:

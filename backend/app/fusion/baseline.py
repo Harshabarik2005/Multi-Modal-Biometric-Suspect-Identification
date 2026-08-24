@@ -174,7 +174,8 @@ class AverageFusion(FusionStrategy):
 
 
 class QualityWeightedFusion(FusionStrategy):
-    """Weight each modality by how good a look it got, and how fresh it is.
+    """Weight each modality by how good a look it got, how fresh it is, and how
+    much it can tell apart at all.
 
     The strongest fixed rule available without learning anything, and therefore
     the honest bar for Phase 6. It already does something the paper's baseline
@@ -196,16 +197,41 @@ class QualityWeightedFusion(FusionStrategy):
         for item in inputs:
             if item.modality not in calibrated:
                 continue
-            # Quality of the look, times how far the reference can still be
-            # trusted. A stale re-ID reference is downweighted even when the
-            # crop itself was excellent.
-            raw_weights[item.modality] = max(0.0, item.quality) * max(0.0, item.trust)
+            # Three factors, not two.
+            #
+            # Quality and trust describe this *sighting*: how good a look the
+            # camera got, and how far the stored reference can still be
+            # trusted. Separation describes the *modality*: the gap between
+            # what a stranger scores and what the person themselves scores,
+            # which is the entire room it has to work in.
+            #
+            # Without the third factor, weight came from crop quality alone --
+            # and crop quality says "this is a clear picture", not "this
+            # picture can tell people apart". Measured on real footage: a
+            # correct identification with face at 0.79 raw (calibrated 0.74)
+            # was outvoted by re-ID, whose 0.155-wide band put every score,
+            # genuine and impostor alike, under its own impostor anchor and so
+            # clipped to exactly 0.0. Re-ID took 58% of the weight for
+            # contributing nothing and dragged 0.74 down to 0.30, under the
+            # threshold. Scaling by separation puts it at 18%, and the face
+            # carries the decision it should have carried.
+            #
+            # This does not silence a narrow modality -- re-ID can still
+            # disagree, and a genuinely stale or wrong appearance still pulls
+            # the score down. It stops a modality outvoting the others on the
+            # strength of a picture rather than of evidence.
+            calibration = self.calibrations.get(item.modality)
+            separation = calibration.separation if calibration else 1.0
+            raw_weights[item.modality] = (
+                max(0.0, item.quality) * max(0.0, item.trust) * max(0.0, separation)
+            )
 
         total = sum(raw_weights.values())
         if total <= 0.0:
-            # Every available modality scored zero quality. Fall back to an
-            # equal-weight average rather than dividing by zero -- the
-            # similarities are still real, we just have no basis to rank them.
+            # Nothing available carries any weight -- every modality scored
+            # zero quality, or zero trust. Fall back to an equal-weight average
+            # rather than dividing by zero: the similarities are still real, we
+            # just have no basis to rank them.
             #
             # The result keeps AverageFusion's own name, so the audit record
             # says what actually happened. Callers must read the name off the

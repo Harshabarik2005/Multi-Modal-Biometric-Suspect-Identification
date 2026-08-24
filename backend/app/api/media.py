@@ -244,11 +244,28 @@ def observations_from_uploads(
         # Renumber onto the end of what came before. Each video's frame indices
         # start at 0, so concatenating them raw produced [0,1,2,3,0,1,2,3] --
         # not monotonic, despite this function's docstring promising it was.
+        #
+        # Frame indices are counters and may be renumbered freely. Timestamps
+        # are NOT: they are the only record of how fast the footage was shot,
+        # and gait recovers cadence from them (LOG-06). This used to assign
+        # `float(offset + index)` to both -- one second per frame, whatever the
+        # camera actually did. Gait needs at least 3 samples across a 0.28s
+        # half cycle; at the resulting 1Hz it got 0.28, so every enrolment
+        # through this function refused gait with "frames too far apart to
+        # measure cadence". Not some enrolments -- every one, for everybody,
+        # which is why no watchlist entry has ever held a gait template.
+        #
+        # So: shift each clip's real timestamps to sit after the previous
+        # clip's, and leave the spacing within a clip exactly as recorded.
         offset = (observations[-1].frame_index + 1) if observations else 0
+        time_offset = (observations[-1].timestamp_s + 1.0) if observations else 0.0
+        clip_start_s = video_observations[0].timestamp_s if video_observations else 0.0
         start = len(observations)
         for index, observation in enumerate(video_observations):
             observation.frame_index = offset + index
-            observation.timestamp_s = float(offset + index)
+            observation.timestamp_s = time_offset + (
+                observation.timestamp_s - clip_start_s
+            )
         observations.extend(video_observations)
 
         # Track the longest single-video run, and where it sits. Gait reads a
@@ -268,9 +285,16 @@ def observations_from_uploads(
     if images:
         image_observations, summary = observations_from_images(images, settings)
         offset = (observations[-1].frame_index + 1) if observations else 0
+        # A second apart is arbitrary, and honestly so: photographs are
+        # independent sightings with no rate between them. What matters is that
+        # they land after the video and stay ordered. Gait never reads them --
+        # `gait_segment` covers one video only -- so no cadence is derived from
+        # this spacing. Offset in seconds rather than by frame index, so a long
+        # upload cannot leave a photo timestamped before the footage it follows.
+        time_offset = (observations[-1].timestamp_s + 1.0) if observations else 0.0
         for index, observation in enumerate(image_observations):
             observation.frame_index = offset + index
-            observation.timestamp_s = float(offset + index)
+            observation.timestamp_s = time_offset + float(index)
         observations.extend(image_observations)
         combined.images += summary.images
         combined.frames_seen += summary.frames_seen

@@ -177,6 +177,112 @@ class TestQualityWeightedFusion:
         assert QualityWeightedFusion(CALIBRATIONS).fuse([face(None)]).score == 0.0
 
 
+class TestNarrowModalitiesDoNotOutvoteWideOnes:
+    """Weight has to account for how much a modality can tell apart at all.
+
+    Weight used to be `quality * trust`, and quality describes the *crop* --
+    "this is a clear picture", not "this picture can distinguish people". Face
+    spans 0.03 to 0.95 between a stranger and the person themselves; re-ID
+    spans 0.726 to 0.881, a band a sixth as wide. On real footage every re-ID
+    score, genuine and impostor alike, landed under its own impostor anchor and
+    so calibrated to exactly 0.0 -- while its crop quality, being higher than
+    the face's, handed it 58% of the vote. A correct identification with face
+    at 0.74 calibrated was dragged to 0.30 and dropped below threshold.
+    """
+
+    #: The real ratio, from config.yaml: face 0.92 wide, re-ID 0.155.
+    NARROW = {
+        Modality.FACE: ModalityCalibration(Modality.FACE, 0.03, 0.95),
+        Modality.REID: ModalityCalibration(Modality.REID, 0.726, 0.881),
+    }
+
+    def test_a_floored_narrow_modality_cannot_veto_a_clear_face(self) -> None:
+        """The exact measured case: face 0.79 raw, re-ID under its own floor."""
+        strategy = QualityWeightedFusion(self.NARROW)
+        result = strategy.fuse(
+            [
+                FusionInput(Modality.FACE, similarity=0.7884, quality=0.402),
+                FusionInput(Modality.REID, similarity=0.5632, quality=0.531),
+            ]
+        )
+
+        assert result.calibrated[Modality.REID] == 0.0, (
+            "precondition: re-ID is below its impostor anchor"
+        )
+        assert result.weights[Modality.FACE] > result.weights[Modality.REID], (
+            "the wider modality must carry more weight even though its crop "
+            "scored lower"
+        )
+        assert result.score > 0.55, (
+            f"a correct face identification scored {result.score:.3f}, under "
+            "the 0.55 threshold, because a modality contributing nothing held "
+            "the majority of the weight"
+        )
+
+    def test_crop_quality_alone_no_longer_decides_the_vote(self) -> None:
+        """Same qualities, so only separation can distinguish them."""
+        result = QualityWeightedFusion(self.NARROW).fuse(
+            [
+                FusionInput(Modality.FACE, similarity=0.5, quality=0.5),
+                FusionInput(Modality.REID, similarity=0.8, quality=0.5),
+            ]
+        )
+        assert result.weights[Modality.FACE] > result.weights[Modality.REID]
+
+    def test_a_narrow_modality_still_counts(self) -> None:
+        """Downweighted is not silenced -- re-ID must still be able to disagree."""
+        strategy = QualityWeightedFusion(self.NARROW)
+        agrees = strategy.fuse(
+            [
+                FusionInput(Modality.FACE, similarity=0.6, quality=0.5),
+                FusionInput(Modality.REID, similarity=0.881, quality=0.5),
+            ]
+        )
+        disagrees = strategy.fuse(
+            [
+                FusionInput(Modality.FACE, similarity=0.6, quality=0.5),
+                FusionInput(Modality.REID, similarity=0.726, quality=0.5),
+            ]
+        )
+        assert agrees.score > disagrees.score
+        assert result_weight(disagrees, Modality.REID) > 0.0
+
+    def test_quality_and_trust_still_apply(self) -> None:
+        """Separation scales the modality; quality and trust scale the sighting."""
+        strategy = QualityWeightedFusion(self.NARROW)
+        clear = strategy.fuse(
+            [
+                FusionInput(Modality.FACE, similarity=0.6, quality=0.9),
+                FusionInput(Modality.REID, similarity=0.8, quality=0.1),
+            ]
+        )
+        glancing = strategy.fuse(
+            [
+                FusionInput(Modality.FACE, similarity=0.6, quality=0.1),
+                FusionInput(Modality.REID, similarity=0.8, quality=0.9),
+            ]
+        )
+        assert clear.weights[Modality.FACE] > glancing.weights[Modality.FACE]
+
+        stale = strategy.fuse(
+            [
+                FusionInput(Modality.FACE, similarity=0.6, quality=0.5),
+                FusionInput(Modality.REID, similarity=0.8, quality=0.5, trust=0.1),
+            ]
+        )
+        fresh = strategy.fuse(
+            [
+                FusionInput(Modality.FACE, similarity=0.6, quality=0.5),
+                FusionInput(Modality.REID, similarity=0.8, quality=0.5, trust=1.0),
+            ]
+        )
+        assert stale.weights[Modality.REID] < fresh.weights[Modality.REID]
+
+
+def result_weight(result, modality: Modality) -> float:
+    return result.weights.get(modality, 0.0)
+
+
 class TestFusionResult:
     def test_explain_names_each_contributing_modality(self) -> None:
         result = AverageFusion(CALIBRATIONS).fuse([face(0.95), reid(0.98)])
