@@ -631,8 +631,29 @@ label.checkbox input {
   border-radius: var(--radius);
   display: block;
 }
-.person-shot.thumb { height: 72px; width: 56px; object-fit: cover; }
-.person-shot.tile { height: 150px; object-fit: cover; }
+/* `top`, not the default `center`. These are portrait crops of a standing
+   person, so whatever a square window cannot fit comes off the BOTTOM -- the
+   legs -- rather than the top, which is the face. Centred cropping on a
+   1.54:1 portrait in a 150px-tall strip showed the frame from nose to chest
+   and cut the head off entirely, and the wider the card grew the worse it
+   got. */
+.person-shot.thumb {
+  height: 72px;
+  width: 56px;
+  object-fit: cover;
+  object-position: center top;
+}
+
+/* Square, sized from the card's own width rather than pinned to 150px. A
+   fixed height meant the crop got more brutal every time the column widened,
+   which is a property of the layout leaking into whether you can recognise
+   somebody. */
+.person-shot.tile {
+  height: auto;
+  aspect-ratio: 1 / 1;
+  object-fit: cover;
+  object-position: center top;
+}
 
 .shot-missing {
   display: flex;
@@ -648,7 +669,9 @@ label.checkbox input {
   border-radius: var(--radius);
 }
 .shot-missing.thumb { height: 72px; width: 56px; padding: 4px; font-size: 0.625rem; }
-.shot-missing.tile { height: 150px; }
+/* Matches the photo it stands in for, so a card with no picture is the same
+   shape as one that has it and the grid does not go ragged. */
+.shot-missing.tile { height: auto; aspect-ratio: 1 / 1; }
 
 /* --- weight breakdown ----------------------------------------------------- */
 
@@ -674,10 +697,16 @@ label.checkbox input {
 
 .record-grid {
   display: grid;
-  /* 250px, not the original 190px: the cards now carry an action row, and at
-     190px five controls wrapped into a ragged stack that read as five separate
-     decisions rather than one set. */
-  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  /* Floor of 250px, not the original 190px: the cards now carry an action row,
+     and at 190px five controls wrapped into a ragged stack that read as five
+     separate decisions rather than one set.
+
+     Ceiling of 300px, not 1fr: the photo is square, so column width sets card
+     height. With `1fr` a watchlist of two people stretched each card across
+     half the screen and gave them 400px portraits. Columns stop growing and
+     the row simply ends -- a short watchlist should look short. */
+  grid-template-columns: repeat(auto-fill, minmax(250px, 300px));
+  justify-content: start;
   gap: 14px;
 }
 
@@ -886,4 +915,9 @@ label.checkbox input {
   .evidence { grid-template-columns: 1fr; }
   .person-shot { height: 200px; }
   .masthead { padding: 16px 0 14px; }
+
+  /* The 300px ceiling exists to stop cards ballooning on a wide screen. On a
+     narrow one there is nothing to balloon into, and it only left a strip of
+     dead space beside a card that should have filled the width. */
+  .record-grid { grid-template-columns: 1fr; }
 }
