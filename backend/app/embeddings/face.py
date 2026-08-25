@@ -65,6 +65,31 @@ class FaceEmbedder(PerFrameBranch):
             ctx_id=ctx_id, det_size=(self.cfg.det_size, self.cfg.det_size)
         )
 
+        # Built once, not per frame: the coefficients are frozen in the module,
+        # so this is only unpacking three small arrays, but it runs on every
+        # face the branch sees and there is no reason to repeat it.
+        #
+        # Guarded because occlusion scoring is an improvement to quality, not a
+        # requirement for embedding. If it cannot be constructed the branch
+        # still works exactly as it did before -- `_visibility` returns 1.0 and
+        # nothing is penalised.
+        self.occlusion = None
+        if self.cfg.occlusion_aware:
+            try:
+                from app.embeddings.occlusion import OcclusionDetector
+
+                detector = OcclusionDetector()
+                if detector.trained:
+                    self.occlusion = detector
+                else:
+                    logger.warning(
+                        "face.occlusion_aware is on but occlusion.py carries no "
+                        "fitted coefficients, so covered faces will not be "
+                        "penalised. Run scripts/train_occlusion.py."
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Occlusion scoring unavailable: %s", exc)
+
     def _resolve_providers(self) -> list[str]:
         import onnxruntime
 
@@ -84,10 +109,12 @@ class FaceEmbedder(PerFrameBranch):
 
     # -- quality -----------------------------------------------------------
 
-    def _quality(self, face: Any, crop_height: int) -> tuple[float, dict[str, float]]:
+    def _quality(
+        self, face: Any, crop_height: int, crop: np.ndarray | None = None
+    ) -> tuple[float, dict[str, float]]:
         """Score how much this face should be trusted, in [0, 1].
 
-        Three independent ways a face can be unusable, multiplied together so
+        Four independent ways a face can be unusable, multiplied together so
         that any one of them failing drags the score down:
 
         * **Detection confidence** -- was it clearly a face at all.
@@ -96,6 +123,14 @@ class FaceEmbedder(PerFrameBranch):
           be penalised even when detection is confident.
         * **Resolution** -- a 20px face upsampled to the model's input carries
           almost no identity information regardless of how frontal it is.
+        * **Visibility** -- how much of the face is not covered up. The first
+          three all rise when a face is masked: an opaque shape is a clean,
+          high-contrast region, so detection gets *more* confident, while yaw
+          and pixel count do not move. Measured on a real enrolment crop, a
+          mask took similarity to 0.628 and quality from 0.596 up to 0.642, and
+          mask plus sunglasses took similarity to 0.248 with quality still
+          0.610. Fusion weights by quality, so without this factor the branch
+          that has stopped working is handed the vote (see occlusion.py).
         """
         det_score = float(getattr(face, "det_score", 0.0))
 
@@ -119,7 +154,9 @@ class FaceEmbedder(PerFrameBranch):
         face_height = float(y2 - y1)
         resolution = min(1.0, face_height / float(self.cfg.ideal_face_height))
 
-        quality = det_score * frontality * resolution
+        visibility, occlusion = self._visibility(face, crop)
+
+        quality = det_score * frontality * resolution * visibility
         detail = {
             "det_score": det_score,
             "yaw": yaw,
@@ -128,8 +165,44 @@ class FaceEmbedder(PerFrameBranch):
             "face_height": face_height,
             "resolution": resolution,
             "crop_height": float(crop_height),
+            "visibility": visibility,
         }
+        if occlusion is not None:
+            # Named regions, so the review console can say "mouth and nose
+            # covered" rather than only showing a number that dropped.
+            for region, covered in occlusion.visible.items():
+                detail[f"visible_{region.value}"] = 0.0 if not covered else 1.0
         return float(np.clip(quality, 0.0, 1.0)), detail
+
+    def _visibility(self, face: Any, crop: np.ndarray | None):
+        """How much of the face is not covered, and the map behind it.
+
+        Returns 1.0 -- meaning "no penalty" -- whenever the question cannot be
+        answered: no crop, no keypoints, or an untrained detector. A quality
+        factor that fails closed would silently mark every face as disguised,
+        which looks exactly like the model working and is far harder to notice
+        than it failing.
+        """
+        if crop is None or crop.size == 0:
+            return 1.0, None
+
+        keypoints = getattr(face, "kps", None)
+        if keypoints is None:
+            return 1.0, None
+
+        detector = self.occlusion
+        if detector is None or not detector.trained:
+            return 1.0, None
+
+        try:
+            occlusion = detector.detect(
+                crop, tuple(float(v) for v in face.bbox), keypoints
+            )
+        except Exception as exc:  # noqa: BLE001 - never kill a run over quality
+            logger.debug("Occlusion check failed on a crop: %s", exc)
+            return 1.0, None
+
+        return occlusion.visible_identity, occlusion
 
     # -- per-frame embedding -----------------------------------------------
 
@@ -146,7 +219,7 @@ class FaceEmbedder(PerFrameBranch):
         # A body crop should contain exactly one face; if the box caught a
         # neighbour too, keep the largest, which is the tracked person.
         face = max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
-        quality, detail = self._quality(face, crop.shape[0])
+        quality, detail = self._quality(face, crop.shape[0], crop)
 
         if quality < self.cfg.min_quality:
             return ModalityEmbedding.empty(self.modality, reason="below min_quality")

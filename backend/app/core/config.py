@@ -99,6 +99,14 @@ class FaceSettings(BaseModel):
     # profile and back-of-head frames do not blur the reference vector.
     enroll_top_fraction: float = Field(0.4, gt=0.0, le=1.0)
     enroll_min_frames: int = 10
+    #: Penalise quality by how much of the face is actually visible (Phase 11).
+    #:
+    #: On by default, because without it a covered face scores HIGHER than a
+    #: clear one -- an opaque shape makes the detector more confident while yaw
+    #: and pixel count do not move -- and quality is what fusion weights by.
+    #: Turn it off to reproduce pre-Phase-11 numbers, or where a deployment
+    #: sees no occlusion and wants the milliseconds back.
+    occlusion_aware: bool = True
 
 
 class GaitSettings(BaseModel):

@@ -78,6 +78,17 @@ face:
   ideal_face_height: 112.0
   enroll_top_fraction: 0.4
   enroll_min_frames: 10
+  # Score quality by how much of the face is actually visible, not just by
+  # pose and size (Phase 11). Without it a covered face scores HIGHER than a
+  # clear one: an opaque shape makes the detector more confident while yaw and
+  # pixel count do not move. Measured on a real enrolment crop, a mask took
+  # similarity to 0.628 while quality ROSE from 0.596 to 0.642, and mask plus
+  # sunglasses took similarity to 0.248 with quality still 0.610. Quality is
+  # what fusion weights by, so the branch that had stopped working was handed
+  # the vote. With this on, the same three come out 0.263, 0.428, and refused.
+  # Costs eight small histograms per face. Turn off to reproduce pre-Phase-11
+  # numbers. See app/embeddings/occlusion.py.
+  occlusion_aware: true
 
 # --- Phase 3: gait branch --------------------------------------------------
 gait:

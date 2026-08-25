@@ -924,9 +924,11 @@ Phase 4 (`trust_at`).
 |---|---|
 | `app/embeddings/disguise.py` | synthetic masks, sunglasses, hoods, blur |
 | `scripts/test_disguise.py` | measures the face branch under occlusion |
+| `scripts/train_occlusion.py` | fits the occlusion detector, prints its coefficients |
+| `scripts/measure_regions.py` | measures how much identity each face region carries |
 | `scripts/benchmark.py` | per-stage timing |
 
-### The face branch is occlusion-aware, and now it is measured
+### The face branch was not occlusion-aware, whatever the plan said
 
 The build plan claimed an "occlusion-aware face branch" that had never been
 tested. Measured on the enrollment fixture (baseline quality 0.480):
@@ -939,15 +941,92 @@ tested. Measured on the enrollment fixture (baseline quality 0.480):
 | **mask + sunglasses** | 52% | **0.254** | **0.233** |
 | blur | — | 0.764 | 0.425 |
 
-Similarity and quality fall **together**. No disguise produced the dangerous
-case — an embedding far from the reference while still reporting good quality —
-which is what fusion needs, since it weights by quality and would trust such an
-embedding.
+Similarity and quality fall **together** here. On this fixture no disguise
+produced the dangerous case — an embedding far from the reference while still
+reporting good quality — which is what fusion needs, since it weights by
+quality and would trust such an embedding.
 
-Note the practical reading: a masked face still matches at 0.741, comfortably
-over threshold. A face that is both masked and wearing sunglasses drops to
-0.254 and correctly does *not* match — which is exactly the situation where
-gait and re-ID have to carry the identification.
+### That conclusion was wrong, and one fixture is why
+
+Repeating the same measurement on a real enrolment crop rather than the
+synthetic fixture gave the opposite result:
+
+| disguise | face covered | similarity | quality (before) |
+|---|---|---|---|
+| *(none)* | 0% | 1.0000 | 0.596 |
+| mask | 36% | 0.6277 | **0.642** |
+| sunglasses | 15% | 0.8102 | 0.548 |
+| hood | 47% | 0.8728 | 0.524 |
+| **mask + sunglasses** | 52% | **0.2480** | **0.610** |
+
+A mask *raised* the score. Half the face covered, identity gone — 0.248 is
+stranger territory — and the branch was more confident than on the clean
+photograph. The dangerous case was not merely present, it was the worst row in
+the table.
+
+The mechanism is mechanical, and it is why the fixture hid it. Quality was
+`det_score x frontality x resolution`. An opaque shape is a clean,
+high-contrast region, so the detector gets **more** confident; yaw and pixel
+count do not move. On the fixture the face was small enough that `resolution`
+dominated and masked the effect. On a well-framed face nothing was left to
+hold the score down.
+
+So "occlusion-aware" described a branch that had no idea what occlusion was.
+
+### Making the claim true
+
+`app/embeddings/occlusion.py` adds a fourth quality factor: how much of the
+face is actually visible. It follows Dhamecha et al., *Recognizing Disguised
+Faces: Human and Machine Evaluation* (PLoS ONE 2014), whose Anavrta framework
+classifies face patches as biometric or non-biometric from an Intensity and
+Texture Encoder feature, and matches only on the clean ones.
+
+Two departures. Regions come from InsightFace's five keypoints rather than a
+fixed 5x5 grid, so they follow the face through pose and scale. And the result
+drives **quality** rather than the embedding — their patch AND needs a
+patch-based matcher, and ArcFace reads the whole face at once and cannot be
+handed a face with holes in it. Quality is the right home anyway: it already
+decides how far fusion trusts this branch.
+
+Same crop, after:
+
+| disguise | similarity | quality (before) | quality (after) |
+|---|---|---|---|
+| *(none)* | 1.0000 | 0.596 | 0.596 |
+| mask | 0.6277 | 0.642 | **0.263** |
+| sunglasses | 0.8102 | 0.548 | **0.428** |
+| hood | 0.8728 | 0.524 | 0.524 |
+| **mask + sunglasses** | 0.2480 | 0.610 | **refused outright** |
+
+The worst row now produces no embedding at all, which is the correct answer:
+there is not enough face left to identify anyone from.
+
+**What the validation does and does not establish.** The classifier is fitted
+on synthetic coverings, so it is necessarily good at recognising synthetic
+coverings. Two checks push past that. Held out by occluder type — fit without
+one covering, tested on it — everything scores AUC 0.999 or better except
+random noise, which scores **0.000**: not chance, but confidently backwards,
+because a noise patch has *more* local variation than skin. That is a real
+limit and it is why an unlearned flatness rule was rejected; flatness also
+scores 0.000 on stripes. Second, transfer to the shapes `disguise.py` actually
+draws, which the fit never saw: mask lights up nose and mouth on 9 of 10 faces,
+sunglasses lights up both eyes on 7 of 10, and clean faces produce **zero**
+false alarms. Ten clean faces measured through the full branch all report
+visibility 1.000, so ordinary matching is untouched.
+
+None of this is evidence about a real cloth mask under real lighting. What is
+contributed is the architecture — a face branch that knows which parts of a
+face it can see — plus an honest measurement of the failure it removes. Real
+disguise footage, such as the DFW dataset, is what would settle the rest.
+
+**Per-region weights are deliberately not shipped.** `scripts/measure_regions.py`
+derives them by covering one region at a time and measuring how far the
+embedding moves, which is the right method. Run here it reported the eyes as
+the *least* important region — false for any deep encoder, and an artefact of
+the only available subject wearing glasses, so that region was already occluded
+before the experiment covered it. Freezing that would teach the system that
+hiding the eyes costs nothing. Weighting falls back to region area, which
+assumes only that covering more of a face loses more of it.
 
 **The first run of this test was broken and looked like a triumph.** It
 reported similarity 1.000 for a masked face — apparently perfect invariance. In
