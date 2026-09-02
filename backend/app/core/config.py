@@ -212,6 +212,14 @@ class ReIDSettings(BaseModel):
     # OSNet's training input size. Do not change without retraining.
     input_height: int = 256
     input_width: int = 128
+    #: Crops per forward pass. The batch used to be "however many there are",
+    #: which is fine at 30fps for a few seconds and fatal otherwise: enrolment
+    #: keeps up to 600 observations PER video, so three 60fps clips handed the
+    #: model ~1800 crops at once and asked a 4GB card for 3.41GiB in a single
+    #: allocation. Chunking costs nothing measurable -- the GPU is saturated
+    #: long before 64 crops -- and makes memory a function of this number
+    #: rather than of how long somebody filmed for.
+    max_batch: int = 64
 
     min_frames: int = 3
     min_quality: float = Field(0.20, ge=0.0, le=1.0)

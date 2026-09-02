@@ -485,6 +485,88 @@ class TestMultipleVideos:
         assert gait_observations([1, 2, 3, 4, 5], summary) == []
 
 
+class TestGaitIsOfferedEveryClip:
+    """Gait must not be handed a clip by upload order.
+
+    It used to take the single longest run, and ties went to whichever video
+    was uploaded first. Ties are the NORMAL case: enrolment caps each video at
+    ENROLMENT_MAX_OBSERVATIONS, so any two clips longer than that are both
+    exactly 600 frames. A face video uploaded before a walking video therefore
+    won, and gait analysed somebody standing still -- reporting, accurately,
+    "legs barely move; person is not walking".
+
+    Measured on real enrolment footage: the face clip and the walking clip both
+    capped at 600, face was offered first and refused, and the walking clip
+    enrolled at quality 0.713 the moment it was tried.
+    """
+
+    @staticmethod
+    def _summary_of(counts: list[int]):
+        from app.api.media import MediaSummary
+
+        summary = MediaSummary(videos=len(counts), has_motion_source=True)
+        start = 0
+        for count in counts:
+            summary.video_segments.append((start, start + count))
+            if count > summary.longest_video_run:
+                summary.longest_video_run = count
+                summary.gait_segment = (start, start + count)
+            start += count
+        summary.observations = start
+        summary.video_observations = start
+        return summary
+
+    def test_every_clip_is_offered_not_just_the_longest(self) -> None:
+        from app.api.media import gait_candidates
+
+        summary = self._summary_of([600, 600, 545])
+        observations = list(range(1745))
+        candidates = gait_candidates(observations, summary)
+
+        assert len(candidates) == 3, "all three clips must be offered"
+        assert [len(c) for c in candidates] == [600, 600, 545]
+
+    def test_tied_clips_are_both_reachable(self) -> None:
+        """The exact failure: two clips at the cap, only one ever tried."""
+        from app.api.media import gait_candidates, gait_observations
+
+        summary = self._summary_of([600, 600])
+        observations = list(range(1200))
+
+        # The old single-pick path can only ever see the first.
+        assert gait_observations(observations, summary) == list(range(600))
+        # The new one reaches the second as well.
+        reachable = {tuple(c) for c in gait_candidates(observations, summary)}
+        assert tuple(range(600, 1200)) in reachable
+
+    def test_longest_is_offered_first(self) -> None:
+        """Ordering is a cost heuristic: a longer clip more often holds a
+        complete cycle, so trying it first usually means trying it once."""
+        from app.api.media import gait_candidates
+
+        summary = self._summary_of([120, 600, 300])
+        candidates = gait_candidates(list(range(1020)), summary)
+        assert [len(c) for c in candidates] == [600, 300, 120]
+
+    def test_photos_only_offers_nothing(self) -> None:
+        from app.api.media import MediaSummary, gait_candidates
+
+        summary = MediaSummary(images=5, observations=5)
+        assert gait_candidates([1, 2, 3, 4, 5], summary) == []
+
+    def test_an_older_summary_still_yields_its_one_segment(self) -> None:
+        """`video_segments` is new; a summary built before it must not go from
+        one candidate to none."""
+        from app.api.media import MediaSummary, gait_candidates
+
+        summary = MediaSummary(
+            videos=1, has_motion_source=True, longest_video_run=40,
+            gait_segment=(10, 50),
+        )
+        candidates = gait_candidates(list(range(60)), summary)
+        assert [len(c) for c in candidates] == [40]
+
+
 class TestUploadsKeepTheRealFrameRate:
     """Renumbering the uploads must not rewrite how fast they were shot.
 

@@ -106,6 +106,21 @@ class MediaSummary:
     #: Index range of that run within the returned observations, so callers can
     #: hand gait a genuinely contiguous sequence.
     gait_segment: tuple[int, int] = (0, 0)
+    #: Every video's contiguous run, longest first.
+    #:
+    #: Picking only the longest was wrong, and quietly so. `gait_segment` broke
+    #: ties by upload order, and ties are the normal case: enrolment caps each
+    #: video at ENROLMENT_MAX_OBSERVATIONS, so any two clips longer than that
+    #: are both exactly 600 and the first uploaded wins. A face video and a
+    #: walking video therefore competed on filename order, and gait spent this
+    #: project's entire history analysing whichever happened to be first --
+    #: usually somebody standing still, which it correctly reported as "legs
+    #: barely move; person is not walking".
+    #:
+    #: Length was never the right question anyway. The right question is which
+    #: clip contains a walk, and the only thing that can answer it is the gait
+    #: branch itself. So every candidate is offered and the caller tries them.
+    video_segments: list[tuple[int, int]] = field(default_factory=list)
 
 
 def observations_from_images(
@@ -268,9 +283,12 @@ def observations_from_uploads(
             )
         observations.extend(video_observations)
 
-        # Track the longest single-video run, and where it sits. Gait reads a
-        # sequence; a run spanning two recordings, potentially at different
-        # frame rates and of different people, is not one.
+        # Record every single-video run. Gait reads a sequence, and a run
+        # spanning two recordings -- potentially at different frame rates and
+        # of different people -- is not one.
+        if len(video_observations):
+            combined.video_segments.append((start, start + len(video_observations)))
+
         if len(video_observations) > combined.longest_video_run:
             combined.longest_video_run = len(video_observations)
             combined.gait_segment = (start, start + len(video_observations))
@@ -307,14 +325,37 @@ def observations_from_uploads(
 def gait_observations(
     observations: list[TrackObservation], summary: MediaSummary
 ) -> list[TrackObservation]:
-    """The subset of `observations` gait may legitimately read.
+    """The single longest contiguous run, for callers that want just one.
 
-    One contiguous run from a single video. Photographs are excluded because
-    they carry no gait, and separate videos are not spliced together because
-    the cadence would be computed across the join.
+    Photographs are excluded because they carry no gait, and separate videos
+    are not spliced together because the cadence would be computed across the
+    join. Prefer `gait_candidates` when you can afford to try more than one --
+    "longest" is a poor guess at "contains a walk".
     """
     start, end = summary.gait_segment
     return observations[start:end] if end > start else []
+
+
+def gait_candidates(
+    observations: list[TrackObservation], summary: MediaSummary
+) -> list[list[TrackObservation]]:
+    """Every single-video run, longest first, for gait to try in turn.
+
+    Longest first only as a tie-break on cost: a longer clip is likelier to
+    hold a complete gait cycle, so trying it first usually means trying it
+    once. Correctness does not depend on the order -- the branch's own gates
+    decide what is a walk, and this only decides what order it is asked in.
+
+    Falls back to `gait_segment` for summaries built before `video_segments`
+    existed, so a caller holding an older summary still gets one candidate
+    rather than none.
+    """
+    segments = summary.video_segments or (
+        [summary.gait_segment] if summary.gait_segment[1] > summary.gait_segment[0] else []
+    )
+    runs = [observations[start:end] for start, end in segments if end > start]
+    runs.sort(key=len, reverse=True)
+    return runs
 
 
 @dataclass

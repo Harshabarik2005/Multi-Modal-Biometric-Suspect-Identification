@@ -35,7 +35,7 @@ from app.api.auth import CurrentOperator
 from app.api.jobs import Job, JobRunner, ProgressReporter
 from app.api.media import (
     assess_readiness,
-    gait_observations,
+    gait_candidates,
     kind_of,
     observations_from_uploads,
 )
@@ -351,15 +351,38 @@ async def enroll(
                 })
 
             reporter.stage("reading gait")
-            # Only the contiguous run from one video. Passing the whole list
-            # would have gait read a cadence across the join between separate
-            # recordings, and across photographs that have no cadence at all.
-            gait_frames = gait_observations(observations, summary)
-            if summary.has_motion_source and gait_frames:
+            # Each contiguous run from ONE video, tried in turn. Passing the
+            # whole list would have gait read a cadence across the join between
+            # separate recordings, and across photographs that have no cadence
+            # at all.
+            #
+            # Every clip is offered rather than just the longest. The longest
+            # is not the one with a walk in it, and worse, "longest" ties
+            # constantly: enrolment caps each video at 600 observations, so any
+            # two clips over that are both exactly 600 and upload order decided
+            # which one gait saw. A face video filmed before a walking video
+            # therefore won, and gait spent its whole life analysing somebody
+            # standing still and reporting, accurately, that their legs were
+            # not moving.
+            candidates = gait_candidates(observations, summary)
+            if summary.has_motion_source and candidates:
                 from app.embeddings.gait import GaitEmbedder
 
-                gait = GaitEmbedder(settings).embed_reference(gait_frames)
-                if gait.has_signal:
+                embedder = GaitEmbedder(settings)
+                gait = None
+                for candidate in candidates:
+                    attempt = embedder.embed_reference(candidate)
+                    # Keep the first clip that actually contains a walk. The
+                    # branch's own gates are the only thing that can tell.
+                    if attempt.has_signal:
+                        gait = attempt
+                        break
+                    if gait is None:
+                        # Hold the first refusal, so the reported reason
+                        # describes the best candidate rather than the last.
+                        gait = attempt
+
+                if gait is not None and gait.has_signal:
                     embeddings[Modality.GAIT] = gait
                     stored.append("gait")
                 else:
