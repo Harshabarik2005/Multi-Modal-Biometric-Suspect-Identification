@@ -375,10 +375,24 @@ class ReIDEmbedder(PerFrameBranch):
         if not usable:
             return results
 
-        batch = np.stack([self.preprocess(o.crop) for _, o, _, _ in usable])
-        tensor = self.torch.from_numpy(batch).to(self.device)
-        with self.torch.no_grad():
-            features = self.model(tensor).float().cpu().numpy()
+        # Chunked, not one giant tensor. Enrolment can hand this 600
+        # observations per video, so three clips is ~1800 crops; at
+        # 3x256x128 float32 that is 700MB of input alone before any
+        # activations, and a 4GB card refuses with a 3.41GiB allocation
+        # request. Results are identical either way -- OSNet has no
+        # cross-sample dependency -- so this only bounds peak memory.
+        chunk = max(1, int(self.cfg.max_batch))
+        features_chunks = []
+        for start in range(0, len(usable), chunk):
+            window = usable[start : start + chunk]
+            batch = np.stack([self.preprocess(o.crop) for _, o, _, _ in window])
+            tensor = self.torch.from_numpy(batch).to(self.device)
+            with self.torch.no_grad():
+                features_chunks.append(self.model(tensor).float().cpu().numpy())
+            # Drop the reference before the next chunk allocates, so peak usage
+            # is one chunk rather than all of them.
+            del tensor
+        features = np.concatenate(features_chunks, axis=0)
 
         for (index, _, quality, detail), vector in zip(usable, features):
             results[index] = ModalityEmbedding(

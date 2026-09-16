@@ -495,7 +495,10 @@ class GaitEmbedder(EmbeddingBranch):
         if area_cv > self.cfg.max_area_cv:
             return ModalityEmbedding.empty(
                 self.modality,
-                reason="silhouette area unstable; segmentation is failing",
+                reason=(
+                    "silhouette shape keeps changing -- the body is leaving "
+                    "the frame, turning, or not segmenting cleanly"
+                ),
             )
 
         gei = gait_energy_image(silhouettes, half_period)

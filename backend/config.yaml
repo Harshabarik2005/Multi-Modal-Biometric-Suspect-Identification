@@ -162,6 +162,14 @@ reid:
   # OSNet's training input size. Changing this without retraining breaks it.
   input_height: 256
   input_width: 128
+  # Crops per forward pass. The batch used to be "all of them", which is fine
+  # for a few seconds at 30fps and fatal otherwise: enrolment keeps up to 600
+  # observations PER video, so three 60fps clips handed OSNet ~1800 crops at
+  # once. Its first convolution alone is then ~3.4GB, and a 4GB card refused
+  # mid-enrolment with "Tried to allocate 3.41 GiB". Chunking makes peak memory
+  # a function of this number instead of how long somebody filmed for, and the
+  # results are identical -- OSNet has no cross-sample dependency.
+  max_batch: 64
   min_frames: 3
   min_quality: 0.20
   ideal_box_height: 192.0

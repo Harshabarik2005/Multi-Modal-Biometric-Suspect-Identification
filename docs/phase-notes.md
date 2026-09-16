@@ -926,6 +926,7 @@ Phase 4 (`trust_at`).
 | `scripts/test_disguise.py` | measures the face branch under occlusion |
 | `scripts/train_occlusion.py` | fits the occlusion detector, prints its coefficients |
 | `scripts/measure_regions.py` | measures how much identity each face region carries |
+| `scripts/measure_calibration.py` | measures re-ID calibration anchors from real footage |
 | `scripts/benchmark.py` | per-stage timing |
 
 ### The face branch was not occlusion-aware, whatever the plan said

@@ -46,6 +46,14 @@ class ModalityCalibration:
     impostor_anchor: float
     #: Similarity the *same* person typically scores. Maps to 1.0.
     genuine_anchor: float
+    #: Why this modality may not vote yet, or "" when it may.
+    #:
+    #: For anchors that have never been measured on the real distribution. A
+    #: score calibrated against them is not evidence, but it is still a number,
+    #: and fusion would weigh it as one. The modality is still compared, and
+    #: the reviewer is told it was not counted and why; it just carries no
+    #: weight in the score.
+    withheld_reason: str = ""
 
     def __post_init__(self) -> None:
         if self.genuine_anchor <= self.impostor_anchor:
@@ -89,12 +97,22 @@ def default_calibrations(settings) -> dict[Modality, ModalityCalibration]:
     if mismatch:
         logger.warning("%s", mismatch)
 
+    gait_withheld = (
+        ""
+        if cfg.gait_anchors_validated
+        else "gait scoring has only been calibrated on synthetic walkers, "
+        "not on real footage"
+    )
+
     return {
         Modality.FACE: ModalityCalibration(
             Modality.FACE, cfg.face_impostor, cfg.face_genuine
         ),
         Modality.GAIT: ModalityCalibration(
-            Modality.GAIT, cfg.gait_impostor, cfg.gait_genuine
+            Modality.GAIT,
+            cfg.gait_impostor,
+            cfg.gait_genuine,
+            withheld_reason=gait_withheld,
         ),
         Modality.REID: ModalityCalibration(
             Modality.REID, cfg.reid_impostor, cfg.reid_genuine

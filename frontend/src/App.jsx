@@ -24,7 +24,7 @@ import Register from './Register'
  * decision resting mostly on clothing therefore *looks* washed out, where a
  * coloured chart would have let it look as vivid as a face match.
  */
-function WeightBreakdown({ weights = {}, calibrated = {}, strategy }) {
+function WeightBreakdown({ weights = {}, calibrated = {}, unused = {}, strategy }) {
   const entries = Object.entries(weights).filter(([, weight]) => weight > 0)
   if (entries.length === 0) {
     return <p className="muted small">No per-signal breakdown was recorded.</p>
@@ -78,6 +78,28 @@ function WeightBreakdown({ weights = {}, calibrated = {}, strategy }) {
               </tr>
             )
           })}
+          {Object.entries(unused || {})
+            .filter(([modality]) => !(weights[modality] > 0))
+            .map(([modality, why]) => {
+              const meta = MODALITIES[modality] || {}
+              return (
+                <tr key={`unused-${modality}`} className="muted">
+                  <td style={{ whiteSpace: 'nowrap' }}>
+                    <span
+                      className="swatch"
+                      style={{
+                        background: 'transparent',
+                        boxShadow: `inset 0 0 0 1px ${meta.tone || '#999'}`,
+                      }}
+                    />
+                    {meta.label || modality}
+                  </td>
+                  <td className="num">—</td>
+                  <td className="num">—</td>
+                  <td className="small">Not counted: {why}</td>
+                </tr>
+              )
+            })}
         </tbody>
       </table>
       {strategy && (
@@ -188,6 +210,7 @@ function DecisionCard({ decision, demoMode, onReviewed, onError }) {
       <WeightBreakdown
         weights={decision.weights}
         calibrated={decision.calibrated}
+        unused={decision.unused}
         strategy={decision.strategy}
       />
       <AppearanceCaution weights={decision.weights} />
@@ -349,6 +372,7 @@ function Activity({ onError }) {
             <WeightBreakdown
               weights={alert.weights}
               calibrated={alert.calibrated}
+              unused={alert.unused}
               strategy={alert.strategy}
             />
             {alert.reviews.map((review, index) => (

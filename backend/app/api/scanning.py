@@ -98,20 +98,30 @@ def scan_video(
             buffer.last_matched_frame = result.frame_index
 
             # Face and re-ID take the largest crops; gait needs the ordered
-            # sequence, because sorting by size destroys its cadence signal.
-            ordered = list(buffer)
-            sampled = buffer.best(cap) if cap else ordered
+            # sequence, because sorting by size destroys its cadence signal,
+            # and its own paced ring, because a stride outlasts the main one.
+            ordered = list(buffer.gait_observations)
+            sampled = buffer.best(cap) if cap else list(buffer)
 
             probes = {}
+            # What each branch said when it had nothing, kept with whichever
+            # re-match turns out to be this track's best.
+            unused: dict[str, str] = {}
             face = face_embedder.embed(sampled)
             if face.has_signal:
                 probes[Modality.FACE] = face
+            else:
+                unused[Modality.FACE.value] = face.reason or "no signal"
             gait = gait_embedder.embed(ordered)
             if gait.has_signal:
                 probes[Modality.GAIT] = gait
+            else:
+                unused[Modality.GAIT.value] = gait.reason or "no signal"
             reid = reid_embedder.embed(sampled)
             if reid.has_signal:
                 probes[Modality.REID] = reid
+            else:
+                unused[Modality.REID.value] = reid.reason or "no signal"
 
             if not probes:
                 continue
@@ -126,6 +136,10 @@ def scan_video(
                 continue
 
             best = candidates[0]
+            if not best.weights:
+                # Nothing was allowed to vote, so every candidate ties at 0.0
+                # and "the best" would just be the gallery's first entry.
+                continue
             if best.fused_similarity < settings.fusion.threshold:
                 continue
 
@@ -169,7 +183,17 @@ def scan_video(
                 "not_compared": {
                     m.value: score.incomparable_reason
                     for m, score in best.scores.items()
-                    if score.incomparable_reason
+                    # Mismatches only; routine refusals are under "unused".
+                    if score.model_mismatch
+                },
+                # Every signal that did not count toward this score, and why:
+                # the branch saw nothing, it could not be compared, or it was
+                # withheld from voting. Without this a card showing face and
+                # appearance says nothing about gait, and all three causes
+                # look identical -- absent.
+                "unused": {
+                    **unused,
+                    **{m.value: why for m, why in best.not_counted().items()},
                 },
             }
 
@@ -193,6 +217,7 @@ def scan_video(
                 camera_id=camera_id,
                 frame_index=finding["frame_index"],
                 evidence_jpeg=finding.get("evidence_jpeg"),
+                unused={M(k): v for k, v in finding["unused"].items()},
             )
             finding["decision_id"] = decision.id
             finding["status"] = "pending"

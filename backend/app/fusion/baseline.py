@@ -67,6 +67,10 @@ class FusionResult:
     weights: dict[Modality, float] = field(default_factory=dict)
     calibrated: dict[Modality, float] = field(default_factory=dict)
     strategy: str = ""
+    #: Modalities that compared but were not allowed to vote, and why. Kept
+    #: apart from `weights` so "gait was not counted" cannot be mistaken for
+    #: "gait saw nothing".
+    withheld: dict[Modality, str] = field(default_factory=dict)
 
     @property
     def contributing(self) -> list[Modality]:
@@ -74,6 +78,12 @@ class FusionResult:
 
     def explain(self) -> str:
         if not self.weights:
+            if self.withheld:
+                # Something did compare; it was not allowed to vote. That must
+                # not read the same as nothing having compared at all.
+                return "nothing allowed to vote -- not counted: " + "; ".join(
+                    f"{m.value} ({why})" for m, why in self.withheld.items()
+                )
             return "no modality could be compared"
         parts = [
             f"{m.value}={self.calibrated.get(m, 0.0):.2f}(w{self.weights[m]:.2f})"
@@ -104,6 +114,8 @@ class FusionStrategy(ABC):
                     item.modality.value,
                 )
                 continue
+            if calibration.withheld_reason:
+                continue
             result[item.modality] = calibration.calibrate(item.similarity)
         return result
 
@@ -111,8 +123,20 @@ class FusionStrategy(ABC):
     def fuse(self, inputs: list[FusionInput]) -> FusionResult:
         """Combine. Returns score 0.0 with empty weights when nothing compares."""
 
-    def _empty(self) -> FusionResult:
-        return FusionResult(score=0.0, strategy=self.name)
+    def _withheld(self, inputs: list[FusionInput]) -> dict[Modality, str]:
+        """Modalities that had a score but whose calibration bars them."""
+        return {
+            item.modality: calibration.withheld_reason
+            for item in inputs
+            if item.available
+            and (calibration := self.calibrations.get(item.modality)) is not None
+            and calibration.withheld_reason
+        }
+
+    def _empty(self, inputs: list[FusionInput] = ()) -> FusionResult:
+        return FusionResult(
+            score=0.0, strategy=self.name, withheld=self._withheld(list(inputs))
+        )
 
 
 class SingleBestFusion(FusionStrategy):
@@ -134,7 +158,7 @@ class SingleBestFusion(FusionStrategy):
     def fuse(self, inputs: list[FusionInput]) -> FusionResult:
         calibrated = self._calibrate(inputs)
         if not calibrated:
-            return self._empty()
+            return self._empty(inputs)
 
         for modality in self.PRIORITY:
             if modality in calibrated:
@@ -143,8 +167,9 @@ class SingleBestFusion(FusionStrategy):
                     weights={modality: 1.0},
                     calibrated=calibrated,
                     strategy=self.name,
+                    withheld=self._withheld(inputs),
                 )
-        return self._empty()
+        return self._empty(inputs)
 
 
 class AverageFusion(FusionStrategy):
@@ -162,7 +187,7 @@ class AverageFusion(FusionStrategy):
     def fuse(self, inputs: list[FusionInput]) -> FusionResult:
         calibrated = self._calibrate(inputs)
         if not calibrated:
-            return self._empty()
+            return self._empty(inputs)
 
         weight = 1.0 / len(calibrated)
         return FusionResult(
@@ -170,6 +195,7 @@ class AverageFusion(FusionStrategy):
             weights={m: weight for m in calibrated},
             calibrated=calibrated,
             strategy=self.name,
+            withheld=self._withheld(inputs),
         )
 
 
@@ -191,7 +217,7 @@ class QualityWeightedFusion(FusionStrategy):
     def fuse(self, inputs: list[FusionInput]) -> FusionResult:
         calibrated = self._calibrate(inputs)
         if not calibrated:
-            return self._empty()
+            return self._empty(inputs)
 
         raw_weights: dict[Modality, float] = {}
         for item in inputs:
@@ -245,6 +271,7 @@ class QualityWeightedFusion(FusionStrategy):
             weights=weights,
             calibrated=calibrated,
             strategy=self.name,
+            withheld=self._withheld(inputs),
         )
 
 

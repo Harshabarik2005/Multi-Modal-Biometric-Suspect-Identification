@@ -127,6 +127,117 @@ class TestPreprocessing:
         assert out.min() < 0.0 or out.max() > 1.0
 
 
+class TestBatchIsBounded:
+    """Peak GPU memory must depend on `max_batch`, not on clip length.
+
+    The forward pass used to stack every usable observation into one tensor.
+    That is fine for a few seconds at 30fps and fatal otherwise: enrolment
+    keeps up to 600 observations PER video, so three 60fps clips produced
+    ~1800 crops, and OSNet's first convolution alone -- 1800 x 64 x 128 x 64
+    floats -- is about 3.4GB. A 4GB card refused with "Tried to allocate 3.41
+    GiB", mid-enrolment, after the operator had already uploaded everything.
+    """
+
+    def _embedder(self, max_batch: int) -> ReIDEmbedder:
+        import numpy as np
+
+        embedder = ReIDEmbedder.__new__(ReIDEmbedder)
+        embedder.cfg = get_settings().reid.model_copy(
+            update={"max_batch": max_batch, "min_quality": 0.0}
+        )
+        embedder.modality = Modality.REID
+        embedder.device = "cpu"
+        # `__new__` skips __init__, so anything model_id reads has to be set
+        # by hand -- DES-01 added `weights` and this is the second test to
+        # trip over it.
+        embedder.weights = embedder.cfg.weights
+        embedder.batch_sizes: list[int] = []
+
+        class FakeTorch:
+            @staticmethod
+            def from_numpy(array):
+                return array
+
+            @staticmethod
+            def no_grad():
+                import contextlib
+
+                return contextlib.nullcontext()
+
+        class Tensor(np.ndarray):
+            """Stands in for a torch tensor: `.to()` is the device move."""
+
+            def to(self, _device):
+                return self
+
+            def float(self):
+                return self
+
+            def cpu(self):
+                return self
+
+            def numpy(self):
+                return np.asarray(self)
+
+        def from_numpy(array):
+            return array.view(Tensor)
+
+        FakeTorch.from_numpy = staticmethod(from_numpy)
+        embedder.torch = FakeTorch
+
+        def model(tensor):
+            embedder.batch_sizes.append(len(tensor))
+            return np.ones((len(tensor), 512), dtype=np.float32).view(Tensor)
+
+        embedder.model = model
+        return embedder
+
+    def _observations(self, count: int):
+        return [
+            TrackObservation(
+                frame_index=i,
+                timestamp_s=i / 30.0,
+                crop=body_crop(300, 120),
+                box_height=300.0,
+                detection_confidence=0.9,
+            )
+            for i in range(count)
+        ]
+
+    def test_no_forward_pass_exceeds_max_batch(self) -> None:
+        embedder = self._embedder(max_batch=16)
+        embedder.embed_batch(self._observations(100))
+        assert embedder.batch_sizes, "the model was never called"
+        assert max(embedder.batch_sizes) <= 16, embedder.batch_sizes
+
+    def test_every_observation_still_gets_an_embedding(self) -> None:
+        """Chunking must not drop or reorder anything."""
+        embedder = self._embedder(max_batch=16)
+        results = embedder.embed_batch(self._observations(100))
+        assert len(results) == 100
+        assert all(e.has_signal for e in results)
+
+    def test_chunking_does_not_change_the_result(self) -> None:
+        one_pass = self._embedder(max_batch=1000)
+        chunked = self._embedder(max_batch=7)
+        observations = self._observations(50)
+
+        a = one_pass.embed_batch(observations)
+        b = chunked.embed_batch(observations)
+
+        assert one_pass.batch_sizes == [50]
+        assert max(chunked.batch_sizes) <= 7
+        for x, y in zip(a, b):
+            assert np.allclose(x.vector, y.vector)
+
+    def test_a_batch_size_of_zero_does_not_hang(self) -> None:
+        """Misconfiguration must degrade to one-at-a-time, not divide by zero."""
+        embedder = self._embedder(max_batch=0)
+        results = embedder.embed_batch(self._observations(5))
+        assert len(results) == 5
+        assert max(embedder.batch_sizes) == 1
+
+
 @pytest.mark.slow
 class TestReIDEmbedderEndToEnd:
     @pytest.fixture(scope="class")
