@@ -352,6 +352,13 @@ class TestGaitPopulationCentring:
         )
         candidates = gallery.rank({Modality.GAIT: probe}, gait_min_references=3)
         assert all(c.scores[Modality.GAIT].similarity is None for c in candidates)
+        # And says why, so the reviewer is not left reading a bare absence.
+        assert all(
+            "fewer than 3" in c.scores[Modality.GAIT].incomparable_reason
+            for c in candidates
+        )
+        # A routine refusal, not the model mismatch reviewers are warned about.
+        assert not any(c.scores[Modality.GAIT].model_mismatch for c in candidates)
 
     def test_centring_separates_people_that_raw_similarity_cannot(self) -> None:
         gallery = self._gallery(4)
@@ -482,3 +489,95 @@ class TestTheAuditRecordsTheRuleThatRan:
             [FusionInput(modality=Modality.FACE, similarity=0.9, quality=0.8)]
         )
         assert result.strategy == "quality_weighted"
+
+
+class TestWithheldModality:
+    """A modality whose anchors are unmeasured is compared but does not vote."""
+
+    REASON = "not measured on real footage"
+
+    def _calibrations(self) -> dict:
+        calibrations = dict(CALIBRATIONS)
+        calibrations[Modality.GAIT] = ModalityCalibration(
+            Modality.GAIT, 0.52, 0.95, withheld_reason=self.REASON
+        )
+        return calibrations
+
+    def test_it_takes_no_weight_under_any_strategy(self) -> None:
+        for strategy in (SingleBestFusion, AverageFusion, QualityWeightedFusion):
+            result = strategy(self._calibrations()).fuse(
+                [gait(0.90, quality=0.97), reid(0.95)]
+            )
+            assert Modality.GAIT not in result.weights, strategy.name
+            assert Modality.GAIT not in result.calibrated, strategy.name
+            assert result.withheld == {Modality.GAIT: self.REASON}, strategy.name
+
+    def test_it_cannot_sink_a_match_with_a_zero_it_never_earned(self) -> None:
+        """The measured failure. Real centred gait similarities sit under the
+        synthetic impostor anchor and calibrate to 0.0; voting at high quality,
+        that 0.0 pulls a full-strength appearance match under the threshold."""
+        inputs = [reid(0.980, quality=1.0), gait(0.39, quality=0.97)]
+        voting = QualityWeightedFusion(CALIBRATIONS).fuse(inputs)
+        withheld = QualityWeightedFusion(self._calibrations()).fuse(inputs)
+        assert voting.score < 0.55
+        assert withheld.score == pytest.approx(1.0)
+
+    def test_alone_it_gives_no_score_but_still_says_why(self) -> None:
+        result = QualityWeightedFusion(self._calibrations()).fuse([gait(0.90)])
+        assert result.score == 0.0
+        assert result.weights == {}
+        assert result.withheld == {Modality.GAIT: self.REASON}
+
+    def test_the_zero_quality_fallback_still_reports_it(self) -> None:
+        result = QualityWeightedFusion(self._calibrations()).fuse(
+            [face(0.80, quality=0.0), gait(0.90, quality=0.0)]
+        )
+        assert result.strategy == "average"
+        assert Modality.GAIT not in result.weights
+        assert result.withheld == {Modality.GAIT: self.REASON}
+
+    def test_its_explanation_does_not_claim_nothing_compared(self) -> None:
+        text = QualityWeightedFusion(self._calibrations()).fuse([gait(0.90)]).explain()
+        assert "could not be compared" not in text
+        assert "gait" in text and self.REASON in text
+
+    def test_a_candidate_lists_what_did_not_count(self) -> None:
+        def record(pid: str, i: int) -> PersonRecord:
+            vector = l2_normalize(np.eye(4, dtype=np.float32)[i] + 1.0)
+            return PersonRecord(
+                pid,
+                pid.title(),
+                {
+                    Modality.FACE: ModalityEmbedding(Modality.FACE, vector, 0.8),
+                    Modality.GAIT: ModalityEmbedding(Modality.GAIT, vector, 0.7),
+                },
+            )
+
+        gallery = Gallery([record("ann", 0), record("bo", 1), record("cy", 2)])
+        probe = l2_normalize(np.eye(4, dtype=np.float32)[0] + 1.0)
+        best = gallery.rank(
+            {
+                Modality.FACE: ModalityEmbedding(Modality.FACE, probe, 0.8),
+                Modality.GAIT: ModalityEmbedding(Modality.GAIT, probe, 0.9),
+            },
+            strategy=QualityWeightedFusion(self._calibrations()),
+            gait_min_references=3,
+        )[0]
+        # Gait compared -- it has a similarity -- and still did not count.
+        assert best.scores[Modality.GAIT].similarity is not None
+        assert best.not_counted() == {Modality.GAIT: self.REASON}
+
+    def test_gait_is_withheld_until_its_anchors_are_validated(self) -> None:
+        settings = get_settings()
+        assert default_calibrations(settings)[Modality.GAIT].withheld_reason
+        for modality in (Modality.FACE, Modality.REID):
+            assert default_calibrations(settings)[modality].withheld_reason == ""
+
+        validated = settings.model_copy(
+            update={
+                "fusion": settings.fusion.model_copy(
+                    update={"gait_anchors_validated": True}
+                )
+            }
+        )
+        assert default_calibrations(validated)[Modality.GAIT].withheld_reason == ""

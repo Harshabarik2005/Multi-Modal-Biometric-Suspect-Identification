@@ -295,6 +295,25 @@ class FusionSettings(BaseModel):
     # references to estimate a mean; below this many, gait refuses to compare
     # rather than returning a misleadingly high similarity.
     gait_min_references_for_centring: int = 3
+    #: Whether `gait_impostor` and `gait_genuine` were measured on real footage.
+    #:
+    #: They were not; both come from synthetic walkers. Until they are, gait is
+    #: still computed and compared, and the reviewer is told that it was not
+    #: counted and why -- but it carries no weight in the score.
+    #:
+    #: On real footage every centred gait similarity measured so far -- genuine
+    #: and impostor alike, -0.76 to +0.41 -- sits below the 0.52 impostor
+    #: anchor, so each one calibrates to exactly 0.0. Gait's separation is 0.43
+    #: and its trust is always 1.0, so at the gait quality measured on the test
+    #: clips (0.97) it would have taken 21-65% of the weight of every one of the
+    #: eight test identifications while contributing nothing, and seven of them
+    #: would have fallen under the threshold. That is the failure separation
+    #: weighting was introduced for with re-ID, in a modality with twice the pull.
+    #:
+    #: Set True only after re-measuring both anchors on real walks: several
+    #: people, each filmed walking on two separate occasions. One genuine pair
+    #: exists so far, which measures nothing.
+    gait_anchors_validated: bool = False
 
 
 class TrackBufferSettings(BaseModel):
@@ -303,6 +322,31 @@ class TrackBufferSettings(BaseModel):
     # Hard cap on observations held per track. Unbounded buffers are how a
     # busy camera exhausts memory: 20 tracks x thousands of frames of crops.
     max_observations: int = 64
+    #: Gait's own history per track: at most this many observations...
+    gait_max_observations: int = 64
+    #: ...thinned towards this many a second. 0 keeps every frame.
+    #:
+    #: `max_observations` is a frame count, so the time it covers depends on
+    #: the camera: 2.6s at 25fps, 1.07s at 60fps. Gait will not speak until it
+    #: has seen one whole stride, a little over a second for a normal walk.
+    #: Measured on a clean side-on walk: of 76 windows of 64 frames at 60fps,
+    #: not one held a complete stride. Thinned towards 20 a second, 64
+    #: observations span 3.15s and 83% of windows pass every gait gate.
+    #:
+    #: A whole number of frames is skipped between the ones gait keeps, never a
+    #: wall-clock slot -- see `TrackBuffer.gait_stride` for what uneven spacing
+    #: costs. At 25fps and 29.97fps nothing is skipped and gait sees exactly
+    #: what it saw before; at 60fps every third frame is kept.
+    #:
+    #: Its own ring, not a thinned main ring, because face and appearance choose
+    #: their crops from the main ring by box height. Pacing that was tried and
+    #: measured: someone walking into a camera has their tallest boxes mid-walk,
+    #: when the face is still small, so a 3.2s window traded the close-ups for
+    #: them -- on one clip an identification fell from 0.713 to 0.569 as its
+    #: face score dropped from 0.83 to 0.59. The rings hold the same observation
+    #: objects, so gait costs only the crops it keeps after the main ring has
+    #: let them go.
+    gait_sample_hz: float = Field(20.0, ge=0.0)
     # Crops are stored downscaled to this height; anything taller is resized.
     # 256px is comfortably above what ArcFace and OSNet need.
     store_height: int = 256
@@ -310,6 +354,15 @@ class TrackBufferSettings(BaseModel):
     min_box_height: int = 60
     # Ceiling on simultaneously buffered tracks; least-recently-seen is dropped.
     max_tracks: int = 50
+    #: How near a frame edge a box may come, as a fraction of that dimension,
+    #: before the person is treated as cut off.
+    #:
+    #: This was an exact comparison against the edge, and a detector box on a
+    #: body running out of shot stops a pixel or two short of it. Measured on a
+    #: clip of someone walking into the camera until only head and shoulders
+    #: remained: 309 of 491 boxes ended within 4px of the bottom edge and 10
+    #: were flagged, so the fragments reached gait presented as whole bodies.
+    edge_margin_fraction: float = Field(0.01, ge=0.0, le=0.1)
 
 
 class MatchingSettings(BaseModel):

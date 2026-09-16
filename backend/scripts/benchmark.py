@@ -167,8 +167,8 @@ def main(argv: list[str] | None = None) -> int:
     for buffer in store:
         # Mirror the live matching path, which embeds the best N crops rather
         # than every buffered one.
-        ordered = list(buffer)
-        sampled = buffer.best(cap) if cap else ordered
+        ordered = list(buffer.gait_observations)
+        sampled = buffer.best(cap) if cap else list(buffer)
         if len(sampled) < 3:
             continue
         with timer.stage("embed: face (per track)"):

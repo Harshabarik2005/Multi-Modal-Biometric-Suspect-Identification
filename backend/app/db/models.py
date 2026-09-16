@@ -162,6 +162,11 @@ class MatchDecision(Base):
     weights_json: Mapped[str] = mapped_column(Text, default="{}")
     #: JSON: per-modality calibrated scores, for the same reason.
     calibrated_json: Mapped[str] = mapped_column(Text, default="{}")
+    #: JSON: {"gait": "no complete gait cycle detected"} -- every signal that
+    #: did not count toward this decision, and why. Weights alone cannot say
+    #: whether a missing signal saw nothing, could not be compared, or was not
+    #: allowed to vote, and to the reviewer those are three different things.
+    unused_json: Mapped[str] = mapped_column(Text, default="{}")
 
     #: The crop this match was made on, JPEG, encrypted like a template
     #: (DES-02). The review card previously showed a score and some weight

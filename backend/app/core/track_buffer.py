@@ -13,6 +13,9 @@ So this buffer is bounded in three directions at once:
 * **Across tracks** -- at most `max_tracks` are held; the least recently seen
   is evicted first.
 
+Gait also keeps a second ring of the same observations, thinned towards
+`gait_sample_hz` a second so it spans a whole stride whatever the frame rate.
+
 Keeping the *most recent* frames rather than the first is deliberate: a person
 walking towards a camera gets larger and clearer, so recent frames are usually
 the better ones, and a track that has just been re-identified after occlusion
@@ -37,7 +40,13 @@ logger = get_logger(__name__)
 class TrackBuffer:
     """Rolling window of observations for a single tracked person."""
 
-    def __init__(self, track_id: int, max_observations: int) -> None:
+    def __init__(
+        self,
+        track_id: int,
+        max_observations: int,
+        gait_max_observations: int | None = None,
+        gait_sample_interval_s: float = 0.0,
+    ) -> None:
         self.track_id = track_id
         self.observations: deque[TrackObservation] = deque(maxlen=max_observations)
         self.first_frame: int | None = None
@@ -47,6 +56,24 @@ class TrackBuffer:
         self.last_matched_frame: int | None = None
         #: Total observations ever added, including those aged out of the ring.
         self.total_seen: int = 0
+        #: Gait's own history: the same observation objects, thinned in time.
+        #:
+        #: Gait needs a whole stride and `observations` is a frame count, 1.07s
+        #: at 60fps. Face and appearance keep that ring exactly as it was,
+        #: because they choose crops from it by box height and a longer window
+        #: changes which crops win (`gait_sample_hz` has the measurements).
+        self.gait_observations: deque[TrackObservation] = deque(
+            maxlen=gait_max_observations or max_observations
+        )
+        #: Spacing gait aims for between kept observations, in seconds.
+        #: 0 keeps every frame.
+        self.gait_sample_interval_s = gait_sample_interval_s
+        #: The source's frame period, learned as the shortest gap seen. Dropped
+        #: frames only ever lengthen a gap, so the shortest one is the period
+        #: even when the tracker misses frames.
+        self._frame_period_s: float = 0.0
+        self._last_timestamp_s: float = -1.0
+        self._gait_countdown: int = 0
 
     def add(self, observation: TrackObservation) -> None:
         if self.first_frame is None:
@@ -54,6 +81,46 @@ class TrackBuffer:
         self.last_frame = observation.frame_index
         self.total_seen += 1
         self.observations.append(observation)
+        self._note_frame_period(observation.timestamp_s)
+        if self._gait_countdown <= 0:
+            self.gait_observations.append(observation)
+            self._gait_countdown = self.gait_stride() - 1
+        else:
+            self._gait_countdown -= 1
+
+    def gait_stride(self) -> int:
+        """How many frames pass between the ones gait keeps.
+
+        A whole number of frames, never a wall-clock slot. Keeping "one every
+        0.05s" out of a 25fps stream keeps four frames in five, whose gaps run
+        0.04, 0.04, 0.04, 0.08 -- and `resample_cadence` lays its grid on the
+        MEDIAN gap, so one grid point in five has no real sample near it.
+        Measured on evenly spaced frames with a perfect segmenter, cadence
+        coverage falls from 1.00 to 0.80 at 25fps and to 0.67 at 29.97fps
+        against a floor of 0.60, so a track that walks behind something for
+        0.4s is then refused for "too many gaps" on footage that used to carry
+        gait. An integer stride keeps the spacing even at every frame rate: 1
+        at 25 and 29.97fps, which is what gait saw before this ring existed,
+        and 3 at 60fps, which is what makes a stride fit.
+
+        1 until a second frame has arrived, since the period is unknown until
+        then, and 1 whenever the clock does not advance at all -- thinning by
+        time is impossible there, and keeping one frame per track would be a
+        far worse failure than not thinning.
+        """
+        if self.gait_sample_interval_s <= 0.0 or self._frame_period_s <= 0.0:
+            return 1
+        return max(1, int(round(self.gait_sample_interval_s / self._frame_period_s)))
+
+    def _note_frame_period(self, timestamp_s: float) -> None:
+        """Learn the source's frame period from the shortest gap seen."""
+        if timestamp_s >= 0.0 and self._last_timestamp_s >= 0.0:
+            gap = timestamp_s - self._last_timestamp_s
+            if gap > 0.0 and (
+                self._frame_period_s <= 0.0 or gap < self._frame_period_s
+            ):
+                self._frame_period_s = gap
+        self._last_timestamp_s = max(self._last_timestamp_s, timestamp_s)
 
     def __len__(self) -> int:
         return len(self.observations)
@@ -117,7 +184,13 @@ class TrackBufferStore:
             # someone crossing the frame, 16% of frames were part-way out of
             # shot at entry and exit, and excluding them moved periodicity from
             # 0.166 to 0.388 and area stability from 0.145 to 0.092.
+            #
+            # Within a small margin of an edge rather than exactly on it: a box
+            # on a body leaving the frame stops a pixel or two short of it
+            # (`edge_margin_fraction`).
             frame_height, frame_width = frame.shape[:2]
+            margin_x = self.cfg.edge_margin_fraction * frame_width
+            margin_y = self.cfg.edge_margin_fraction * frame_height
             observation = TrackObservation(
                 frame_index=result.frame_index,
                 timestamp_s=result.timestamp_s,
@@ -125,10 +198,10 @@ class TrackBufferStore:
                 box_height=track.height,
                 detection_confidence=track.confidence,
                 at_frame_edge=bool(
-                    track.x1 <= 0.0
-                    or track.y1 <= 0.0
-                    or track.x2 >= float(frame_width)
-                    or track.y2 >= float(frame_height)
+                    track.x1 <= margin_x
+                    or track.y1 <= margin_y
+                    or track.x2 >= float(frame_width) - margin_x
+                    or track.y2 >= float(frame_height) - margin_y
                 ),
             )
             self._buffer_for(track.track_id).add(observation)
@@ -157,7 +230,13 @@ class TrackBufferStore:
     def _buffer_for(self, track_id: int) -> TrackBuffer:
         buffer = self._buffers.get(track_id)
         if buffer is None:
-            buffer = TrackBuffer(track_id, self.cfg.max_observations)
+            hz = self.cfg.gait_sample_hz
+            buffer = TrackBuffer(
+                track_id,
+                self.cfg.max_observations,
+                gait_max_observations=self.cfg.gait_max_observations,
+                gait_sample_interval_s=(1.0 / hz) if hz > 0 else 0.0,
+            )
             self._buffers[track_id] = buffer
         return buffer
 
@@ -196,7 +275,12 @@ class TrackBufferStore:
 
     def memory_estimate_mb(self) -> float:
         """Rough resident size of the buffered crops, for logging."""
-        total = sum(
-            obs.crop.nbytes for buffer in self._buffers.values() for obs in buffer
-        )
+        # Gait keeps observations the main ring has already let go, and both
+        # rings hold the same objects, so each crop is counted once.
+        crops = {
+            id(obs): obs
+            for buffer in self._buffers.values()
+            for obs in (*buffer.observations, *buffer.gait_observations)
+        }
+        total = sum(obs.crop.nbytes for obs in crops.values())
         return total / (1024 * 1024)

@@ -64,6 +64,13 @@ class TrackVerdict:
     # average when every modality scored zero quality, so the strategy that
     # was asked for is not always the one applied (LOG-12).
     best_strategy: str = ""
+    # Every signal that did not count toward the winning score, and why: saw
+    # nothing, could not compare, or was withheld from voting.
+    best_unused: dict = field(default_factory=dict)
+    # The same, from the most recent re-match, for a track that never had one
+    # worth recording -- otherwise a track where nothing could vote reports
+    # "no modality produced an embedding", which is not what happened.
+    last_unused: dict = field(default_factory=dict)
     # Every above-threshold hit, for the audit log section 8 requires.
     hits: list[tuple[int, str, float]] = field(default_factory=list)
 
@@ -105,6 +112,7 @@ def record_verdicts(
             calibrated=verdict.best_calibrated,
             camera_id=camera_id,
             frame_index=verdict.best_frame,
+            unused=verdict.best_unused,
         )
         recorded += 1
     return recorded
@@ -149,6 +157,8 @@ def _report(
             )
             if verdict.breakdown:
                 print(f"           {verdict.breakdown}")
+            for modality, why in verdict.best_unused.items():
+                print(f"           not counted: {modality.value} -- {why}")
     else:
         print("\nNo track matched anyone on the watchlist.")
 
@@ -158,7 +168,11 @@ def _report(
             unmatched.values(), key=lambda v: v.best_similarity, reverse=True
         ):
             if verdict.best_person_id is None:
-                detail = "no modality produced an embedding"
+                detail = (
+                    "nothing was allowed to vote"
+                    if verdict.last_unused
+                    else "no modality produced an embedding"
+                )
             else:
                 detail = (
                     f"closest {verdict.best_person_id} at {verdict.best_similarity:+.3f}"
@@ -166,6 +180,8 @@ def _report(
             print(
                 f"  track {verdict.track_id:>3}  {verdict.observations:>4} obs  {detail}"
             )
+            for modality, why in (verdict.best_unused or verdict.last_unused).items():
+                print(f"           not counted: {modality.value} -- {why}")
 
     print()
     print("=" * 74)
@@ -284,8 +300,9 @@ def run(args: argparse.Namespace) -> int:
             # gait.min_frames anyway -- applying the cap to gait silently
             # disabled it entirely.
             cap = settings.matching.max_observations_to_embed
-            ordered = list(buffer)
-            sampled = buffer.best(cap) if cap else ordered
+            # Gait's own paced ring: a whole stride outlasts the main one.
+            ordered = list(buffer.gait_observations)
+            sampled = buffer.best(cap) if cap else list(buffer)
             verdict = verdicts.setdefault(track_id, TrackVerdict(track_id=track_id))
             verdict.observations = len(buffer)
 
@@ -294,17 +311,28 @@ def run(args: argparse.Namespace) -> int:
             # moderately agreeing is stronger evidence than either alone, and
             # a ladder cannot express that.
             probes = {}
+            unused: dict[Modality, str] = {}
             probe_face = face_embedder.embed(sampled)
             if probe_face.has_signal:
                 probes[Modality.FACE] = probe_face
+            else:
+                unused[Modality.FACE] = probe_face.reason or "no signal"
             if gait_embedder is not None:
                 probe_gait = gait_embedder.embed(ordered)
                 if probe_gait.has_signal:
                     probes[Modality.GAIT] = probe_gait
+                else:
+                    unused[Modality.GAIT] = probe_gait.reason or "no signal"
+            else:
+                unused[Modality.GAIT] = "turned off for this run"
             if reid_embedder is not None:
                 probe_reid = reid_embedder.embed(sampled)
                 if probe_reid.has_signal:
                     probes[Modality.REID] = probe_reid
+                else:
+                    unused[Modality.REID] = probe_reid.reason or "no signal"
+            else:
+                unused[Modality.REID] = "turned off for this run"
 
             if not probes:
                 continue
@@ -317,9 +345,16 @@ def run(args: argparse.Namespace) -> int:
             )
             if not candidates:
                 continue
-            best = candidates[0]
+            # The best candidate that actually voted. When nothing could vote
+            # -- only gait had a signal, and gait is withheld -- every
+            # candidate ties at 0.0 and the first is the gallery's first entry.
+            best = next((c for c in candidates if c.weights), candidates[0])
+            verdict.last_unused = {**unused, **best.not_counted()}
 
-            if best.fused_similarity > verdict.best_similarity:
+            # When nothing voted -- only gait had a signal, and gait is withheld
+            # -- every candidate ties at 0.0 and the first in the gallery would
+            # be reported as "closest". There is no closest person to name.
+            if best.weights and best.fused_similarity > verdict.best_similarity:
                 verdict.best_similarity = best.fused_similarity
                 verdict.best_person_id = best.person.person_id
                 verdict.best_person_name = best.person.display_name
@@ -338,6 +373,7 @@ def run(args: argparse.Namespace) -> int:
                 verdict.best_strategy = (
                     best.fusion.strategy if best.fusion else strategy.name
                 )
+                verdict.best_unused = {**unused, **best.not_counted()}
 
             if best.fused_similarity >= settings.fusion.threshold:
                 verdict.times_matched += 1

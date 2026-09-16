@@ -570,3 +570,59 @@ class TestAPI:
 
     def test_openapi_schema_builds(self, client) -> None:
         assert client.get("/openapi.json").status_code == 200
+
+
+class TestUnusedSignals:
+    """Why a signal did not count is part of the decision record."""
+
+    def test_reasons_are_stored_and_served(self, repo) -> None:
+        from app.api.routes import DecisionOut
+
+        enroll(repo)
+        repo.record_match(
+            "ravi",
+            track_id=1,
+            score=0.9,
+            weights={Modality.REID: 1.0},
+            unused={
+                Modality.GAIT: "no complete gait cycle detected",
+                Modality.FACE: "no usable faces",
+            },
+        )
+        served = DecisionOut.of(repo.decisions_for("ravi")[0])
+        assert served.unused == {
+            "gait": "no complete gait cycle detected",
+            "face": "no usable faces",
+        }
+
+    def test_a_decision_recorded_without_reasons_serves_none(self, repo) -> None:
+        from app.api.routes import DecisionOut
+
+        enroll(repo)
+        repo.record_match("ravi", track_id=1, score=0.9)
+        assert DecisionOut.of(repo.decisions_for("ravi")[0]).unused == {}
+
+    def test_an_existing_database_gains_the_column(self, tmp_path) -> None:
+        """create_all never alters a table that already exists."""
+        import sqlite3
+
+        from sqlalchemy import inspect
+
+        from app.db.repository import create_schema, make_engine
+
+        path = tmp_path / "old.db"
+        engine = make_engine(f"sqlite:///{path}")
+        create_schema(engine)
+        engine.dispose()
+        connection = sqlite3.connect(path)
+        connection.execute("ALTER TABLE match_decisions DROP COLUMN unused_json")
+        connection.commit()
+        connection.close()
+
+        engine = make_engine(f"sqlite:///{path}")
+        columns = {c["name"] for c in inspect(engine).get_columns("match_decisions")}
+        assert "unused_json" not in columns
+        create_schema(engine)
+        columns = {c["name"] for c in inspect(engine).get_columns("match_decisions")}
+        assert "unused_json" in columns
+        engine.dispose()

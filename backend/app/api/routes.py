@@ -135,6 +135,8 @@ class DecisionOut(BaseModel):
     #: What the system relied on. The explainability record.
     weights: dict[str, float] = Field(default_factory=dict)
     calibrated: dict[str, float] = Field(default_factory=dict)
+    #: Signals that did not count toward the decision, and why.
+    unused: dict[str, str] = Field(default_factory=dict)
     status: str
     created_at: str
     reviews: list["ReviewOut"] = Field(default_factory=list)
@@ -160,6 +162,7 @@ class DecisionOut(BaseModel):
             strategy=decision.strategy,
             weights=json.loads(decision.weights_json or "{}"),
             calibrated=json.loads(decision.calibrated_json or "{}"),
+            unused=json.loads(decision.unused_json or "{}"),
             status=decision.status.value,
             created_at=decision.created_at.isoformat(),
             reviews=[ReviewOut.of(r) for r in decision.reviews],

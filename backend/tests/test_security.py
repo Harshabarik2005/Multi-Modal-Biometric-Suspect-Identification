@@ -493,6 +493,7 @@ class TestEmbeddingsCarryTheirModel:
 
         assert score.similarity is None
         assert "different models" in score.incomparable_reason
+        assert score.model_mismatch
 
     def test_the_same_model_still_scores(self) -> None:
         from app.core.types import Modality

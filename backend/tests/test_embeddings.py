@@ -262,6 +262,140 @@ class TestTrackBuffer:
         assert store.get(2).observations[0].crop.shape[0] == 100
         settings.track_buffer.store_height = 256
 
+    def _paced(
+        self,
+        fps: float,
+        seconds: float,
+        hz: float,
+        start_s: float = 0.0,
+        store: TrackBufferStore | None = None,
+        gait_max_observations: int = 64,
+    ) -> TrackBufferStore:
+        settings = get_settings()
+        store = store or TrackBufferStore(
+            settings,
+            config=settings.track_buffer.model_copy(
+                update={
+                    "gait_sample_hz": hz,
+                    "gait_max_observations": gait_max_observations,
+                }
+            ),
+        )
+        frame = np.full((480, 640, 3), 100, dtype=np.uint8)
+        for i in range(int(round(fps * seconds))):
+            store.update(
+                FrameResult(
+                    frame_index=i,
+                    timestamp_s=start_s + i / fps,
+                    tracks=[Track(1, 10, 10, 110, 210)],
+                ),
+                frame,
+            )
+        return store
+
+    def test_gaits_history_covers_a_stride_on_any_camera(self) -> None:
+        """64 frames is 1.07s at 60fps, shorter than one stride. Gait's ring
+        covers seconds whatever the camera, and never unevenly."""
+        for fps in (60.0, 30.0, 25.0):
+            gait = list(self._paced(fps, seconds=10.0, hz=20.0).get(1).gait_observations)
+            span = gait[-1].timestamp_s - gait[0].timestamp_s
+            gaps = [b.timestamp_s - a.timestamp_s for a, b in zip(gait, gait[1:])]
+            assert len(gait) == 64
+            assert span >= 2.5, (fps, span)
+            assert max(gaps) - min(gaps) < 1e-6, (fps, sorted(set(gaps))[:4])
+
+    def test_gaits_ring_reads_cadence_as_well_as_the_main_one(self) -> None:
+        """Cadence is resampled onto a grid built from the MEDIAN gap, so a ring
+        whose frames are unevenly spaced loses coverage before a single mask has
+        failed. At 25 and 29.97fps a 0.05s slot would keep four frames in five."""
+        from types import SimpleNamespace
+
+        from app.embeddings.gait import resample_cadence
+
+        def coverage(observations) -> float:
+            silhouettes = [
+                SimpleNamespace(timestamp_s=o.timestamp_s, frame_index=o.frame_index)
+                for o in observations
+            ]
+            values = np.arange(len(silhouettes), dtype=np.float32)
+            return resample_cadence(silhouettes, values, 25.0).coverage
+
+        for fps in (25.0, 29.97, 60.0):
+            buffer = self._paced(fps, seconds=6.0, hz=20.0).get(1)
+            assert coverage(buffer.gait_observations) >= coverage(buffer.observations), fps
+
+    def test_face_and_appearance_still_see_every_frame(self) -> None:
+        """They pick crops from the main ring by box height, and a longer window
+        changes which crops win. Thinning belongs to gait alone."""
+        buffer = self._paced(60.0, seconds=2.0, hz=20.0).get(1)
+        frames = [o.frame_index for o in buffer.observations]
+        assert len(frames) == 64
+        assert frames == list(range(frames[0], frames[0] + 64))
+        # Every third frame of 120, plus the first, which is kept before a
+        # second frame has revealed the frame period.
+        assert len(buffer.gait_observations) == 41
+
+    def test_the_memory_estimate_counts_each_crop_once(self) -> None:
+        """The rings overlap and gait holds crops the main ring has dropped."""
+        store = self._paced(60.0, seconds=2.0, hz=20.0)
+        buffer = store.get(1)
+        held = {
+            id(obs): obs
+            for obs in (*buffer.observations, *buffer.gait_observations)
+        }
+        assert len(held) > len(buffer.observations), "gait should hold older crops"
+        expected = sum(o.crop.nbytes for o in held.values()) / (1024 * 1024)
+        assert abs(store.memory_estimate_mb() - expected) < 1e-9
+
+    def test_the_rings_share_observations_rather_than_copying(self) -> None:
+        buffer = self._paced(60.0, seconds=1.0, hz=20.0).get(1)
+        assert all(
+            any(kept is seen for seen in buffer.observations)
+            for kept in buffer.gait_observations
+        )
+
+    def test_gait_skips_whole_frames_not_wall_clock_slots(self) -> None:
+        """Every Nth frame, so the gaps stay equal. 25 and 29.97fps are already
+        slower than 20 a second, so nothing is skipped there at all."""
+        for fps, stride in ((60.0, 3), (30.0, 2), (29.97, 1), (25.0, 1)):
+            buffer = self._paced(
+                fps, seconds=4.0, hz=20.0, gait_max_observations=1000
+            ).get(1)
+            assert buffer.gait_stride() == stride, fps
+            kept = [o.frame_index for o in buffer.gait_observations]
+            # From the second kept frame on: the first is kept before the
+            # period is known.
+            gaps = {b - a for a, b in zip(kept[1:], kept[2:])}
+            assert gaps == {stride}, (fps, sorted(gaps))
+
+    def test_gait_thinning_can_be_turned_off(self) -> None:
+        store = self._paced(60.0, seconds=1.0, hz=0.0, gait_max_observations=1000)
+        assert len(store.get(1).gait_observations) == 60
+
+    def test_a_clock_that_does_not_advance_keeps_every_frame(self) -> None:
+        """Pacing needs time. Keeping only the first frame would be far worse
+        than not pacing at all."""
+        store = TrackBufferStore(get_settings())
+        frame = np.full((480, 640, 3), 100, dtype=np.uint8)
+        for i in range(10):
+            store.update(
+                FrameResult(
+                    frame_index=i, timestamp_s=0.0, tracks=[Track(1, 10, 10, 110, 210)]
+                ),
+                frame,
+            )
+        assert len(store.get(1).gait_observations) == 10
+
+    def test_a_gap_does_not_cause_a_burst_of_kept_frames(self) -> None:
+        """A track that reappears is thinned as before, not kept frame after
+        frame while a wall-clock schedule catches up."""
+        store = self._paced(60.0, seconds=1.0, hz=20.0, gait_max_observations=1000)
+        self._paced(60.0, seconds=1.0, hz=20.0, start_s=10.0, store=store)
+        kept = list(store.get(1).gait_observations)
+        after = [o.frame_index for o in kept if o.timestamp_s >= 10.0]
+        assert {b - a for a, b in zip(after, after[1:])} == {3}
+        assert 38 <= len(kept) <= 42
+
 
 class TestGallery:
     def _person(self, pid: str, vector: list[float]) -> PersonRecord:

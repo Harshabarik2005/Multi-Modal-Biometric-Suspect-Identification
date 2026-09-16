@@ -622,6 +622,31 @@ class TestClippingIsMeasuredAgainstTheFrame:
         )
         assert list(store.get(1))[0].at_frame_edge
 
+    def test_a_box_stopping_just_short_of_the_bottom_is_clipped(self) -> None:
+        """What a body leaving the frame actually produces.
+
+        Boxes on someone walking out of the bottom of shot end a pixel or two
+        short of the edge, not on it. Measured: 309 of 491 boxes within 4px of
+        the bottom, and an exact comparison flagged 10 of them.
+        """
+        import numpy as np
+
+        from app.core.track_buffer import TrackBufferStore
+        from app.core.types import FrameResult, Track
+
+        frame = np.zeros((480, 848, 3), dtype=np.uint8)
+        store = TrackBufferStore(get_settings())
+        store.update(
+            FrameResult(
+                frame_index=0,
+                timestamp_s=0.0,
+                tracks=[Track(track_id=1, x1=300, y1=40, x2=420, y2=478,
+                              confidence=0.9)],
+            ),
+            frame,
+        )
+        assert list(store.get(1))[0].at_frame_edge
+
     def test_a_box_running_off_the_side_is_clipped(self) -> None:
         """Horizontal edges count too, and for gait they matter more.
 

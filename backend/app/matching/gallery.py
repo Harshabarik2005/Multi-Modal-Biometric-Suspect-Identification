@@ -173,6 +173,10 @@ class ModalityScore:
     #: "no face was visible" and "the stored reference is from a different
     #: model" are distinguishable, which they are not from a bare None.
     incomparable_reason: str = ""
+    #: True when the reason is a reference from a different model (DES-01) --
+    #: the one refusal a reviewer is warned about, unlike routine ones such as
+    #: a person with no gait reference.
+    model_mismatch: bool = False
 
 
 @dataclass
@@ -208,6 +212,23 @@ class MatchCandidate:
                 suffix = f" w={weight:.2f}" if weight is not None else ""
                 parts.append(f"{modality.value}={score.similarity:+.3f}{suffix}")
         return "  ".join(parts)
+
+    def not_counted(self) -> dict[Modality, str]:
+        """Modalities that reached this comparison but did not count, and why.
+
+        Either the comparison was refused -- no reference, a different model,
+        too few gait references -- or fusion withheld the modality from voting.
+        A branch that produced no probe never gets this far; callers add those
+        from the probe's own reason.
+        """
+        reasons = {
+            modality: score.incomparable_reason or "could not be compared"
+            for modality, score in self.scores.items()
+            if score.similarity is None
+        }
+        if self.fusion is not None:
+            reasons.update(self.fusion.withheld)
+        return reasons
 
 
 class Gallery:
@@ -367,17 +388,25 @@ class Gallery:
             for modality, probe in probes.items():
                 reference = person.embedding(modality)
                 reason = ""
+                is_mismatch = False
                 if reference is None or not probe.has_signal:
                     similarity = None
+                    if reference is None:
+                        reason = "no reference enrolled for this person"
                 elif (mismatch := model_mismatch(probe, reference)) is not None:
                     # Refuse rather than score. Cosine similarity between two
                     # different embedding spaces is noise shaped like a number,
                     # and this system's whole discipline is that "could not
                     # compare" must never collapse into "compared and got a
                     # low score" (DES-01).
-                    similarity, reason = None, mismatch
+                    similarity, reason, is_mismatch = None, mismatch, True
                 elif modality is Modality.GAIT:
                     similarity = self._gait_similarity(probe, reference, gait_mean)
+                    if similarity is None:
+                        reason = (
+                            f"fewer than {gait_min_references} people have a "
+                            "gait reference, so walks cannot be compared yet"
+                        )
                 else:
                     similarity = probe.similarity(reference)
 
@@ -386,6 +415,7 @@ class Gallery:
                     similarity=similarity,
                     probe_quality=probe.quality,
                     incomparable_reason=reason,
+                    model_mismatch=is_mismatch,
                 )
 
             if strategy is not None:

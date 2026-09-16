@@ -58,6 +58,10 @@ function WeightBar({ weights }) {
 /** One candidate found in the footage. */
 function Candidate({ finding }) {
   const appearance = appearanceShare(finding.weights || {})
+  // Everything that did not count, less what the caution below already names.
+  const unused = Object.entries(finding.unused || {}).filter(
+    ([modality]) => !(finding.not_compared || {})[modality],
+  )
 
   return (
     <article className="card">
@@ -123,6 +127,15 @@ function Candidate({ finding }) {
               ([modality, reason]) =>
                 `${MODALITIES[modality]?.label || modality} — ${reason}`,
             )
+            .join('; ')}
+        </p>
+      )}
+
+      {unused.length > 0 && (
+        <p className="muted small">
+          Not counted in this score:{' '}
+          {unused
+            .map(([modality, why]) => `${MODALITIES[modality]?.label || modality} — ${why}`)
             .join('; ')}
         </p>
       )}

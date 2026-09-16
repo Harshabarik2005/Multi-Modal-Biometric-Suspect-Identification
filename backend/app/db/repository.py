@@ -83,7 +83,7 @@ def create_schema(engine: Engine) -> None:
 _ADDED_COLUMNS = {
     "templates": {"model_id": "VARCHAR(64) DEFAULT ''"},
     "decision_reviews": {"overturns_previous": "BOOLEAN DEFAULT 0"},
-    "match_decisions": {"evidence_jpeg": "BLOB"},
+    "match_decisions": {"evidence_jpeg": "BLOB", "unused_json": "TEXT DEFAULT '{}'"},
     "people": {"reference_jpeg": "BLOB"},
 }
 
@@ -459,6 +459,7 @@ class WatchlistRepository:
         camera_id: str = "",
         frame_index: int = 0,
         evidence_jpeg: bytes | None = None,
+        unused: dict[Modality, str] | None = None,
     ) -> MatchDecision:
         """Record a candidate match. Always PENDING -- never auto-confirmed.
 
@@ -482,6 +483,9 @@ class WatchlistRepository:
             ),
             calibrated_json=json.dumps(
                 {m.value: round(c, 4) for m, c in (calibrated or {}).items()}
+            ),
+            unused_json=json.dumps(
+                {m.value: str(why) for m, why in (unused or {}).items()}
             ),
             evidence_jpeg=self._encode_bytes(evidence_jpeg),
             status=DecisionStatus.PENDING,

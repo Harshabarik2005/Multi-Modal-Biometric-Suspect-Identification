@@ -121,3 +121,19 @@ class TestTheReviewQueueIsNotFlooded:
 
         record_verdicts(repo, {1: verdict(1, "ravi", 0.99, matched=5)}, "average")
         assert repo.pending_decisions()[0].status is DecisionStatus.PENDING
+
+
+class TestTheDecisionRecord:
+    def test_it_says_what_did_not_count(self, repo) -> None:
+        """A card showing face and appearance must not be silent about gait:
+        seeing nothing, not comparing and not voting all otherwise look absent."""
+        import json
+
+        from match import record_verdicts
+
+        entry = verdict(1, "ravi", 0.91, matched=3)
+        entry.best_unused = {Modality.GAIT: "withheld in this test"}
+        record_verdicts(repo, {1: entry}, "quality_weighted")
+        assert json.loads(repo.pending_decisions()[0].unused_json) == {
+            "gait": "withheld in this test"
+        }
