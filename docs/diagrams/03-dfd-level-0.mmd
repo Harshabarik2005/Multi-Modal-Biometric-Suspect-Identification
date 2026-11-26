@@ -1,0 +1,13 @@
+flowchart LR
+  OP["Operator"]
+  AD["Administrator"]
+  CAM["CCTV footage<br/>video files"]
+  REC["Alert recipients"]
+  SYS(("0<br/>Faceless FRS"))
+
+  OP -->|credentials · enrolment media<br/>scan requests · review verdicts| SYS
+  SYS -->|coverage reports · scan results<br/>candidate matches · audit trail| OP
+  CAM -->|video footage| SYS
+  AD -->|operator accounts<br/>alert dispatch command| SYS
+  SYS -->|dispatch report| AD
+  SYS -->|alerts for confirmed matches| REC

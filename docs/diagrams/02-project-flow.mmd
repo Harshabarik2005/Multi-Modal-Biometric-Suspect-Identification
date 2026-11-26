@@ -1,0 +1,27 @@
+flowchart LR
+  subgraph E["1 · Enrolment"]
+    direction TB
+    E1["Upload photos or video<br/>of a watchlist person"] --> E2["Check coverage<br/>which signals the files support"]
+    E2 --> E3["Detect and track the person<br/>build face · gait · appearance templates"]
+    E3 --> E4[("Encrypt and store<br/>the templates")]
+  end
+  subgraph S["2 · Scanning CCTV footage"]
+    direction TB
+    S1["Upload CCTV video"] --> S2["Detect and track people<br/>YOLOv8n · DeepSORT"]
+    S2 --> S3["Embed each track<br/>face · gait · appearance"]
+    S3 --> S4["Compare with the watchlist<br/>calibrate and fuse"]
+    S4 --> S5{"Score at<br/>least 0.55?"}
+    S5 -- no --> S6["Ignore"]
+    S5 -- yes --> S7["PENDING decision<br/>with evidence crop and reasons"]
+  end
+  subgraph R["3 · Review and alert"]
+    direction TB
+    R1["Reviewer compares the evidence<br/>with the enrolment photo"] --> R2{"Same person?"}
+    R2 -- yes --> R3["CONFIRMED"]
+    R2 -- no --> R4["REJECTED"]
+    R3 --> R5["Alert sent<br/>console · e-mail · SMS"]
+    R3 --> R6[("Audit trail")]
+    R4 --> R6
+  end
+  E -->|watchlist| S
+  S -->|candidates| R

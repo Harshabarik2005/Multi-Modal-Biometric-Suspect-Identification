@@ -1,0 +1,28 @@
+flowchart LR
+  OP["«actor»<br/>Operator"]
+  AD["«actor»<br/>Administrator"]
+  REC["«actor»<br/>Alert recipient"]
+
+  subgraph SYS["Faceless FRS"]
+    UC1(["UC1 Sign in"])
+    UC2(["UC2 Enrol person"])
+    UC2A(["Check media coverage"])
+    UC3(["UC3 Manage watchlist<br/>edit · replace footage · retire<br/>restore · erase · delete"])
+    UC4(["UC4 Scan CCTV footage"])
+    UC5(["UC5 Review candidate match"])
+    UC6(["UC6 View activity and audit trail"])
+    UC7(["UC7 Send alerts"])
+    UC8(["UC8 Manage operator accounts"])
+  end
+
+  OP --- UC1
+  OP --- UC2
+  OP --- UC3
+  OP --- UC4
+  OP --- UC5
+  OP --- UC6
+  UC2 -.->|«include»| UC2A
+  AD -->|«is an»| OP
+  AD --- UC7
+  AD --- UC8
+  UC7 --- REC

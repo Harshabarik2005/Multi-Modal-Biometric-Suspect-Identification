@@ -1,0 +1,39 @@
+flowchart LR
+  subgraph CLIENTS["Clients"]
+    direction TB
+    UI["React console<br/>Register · Records · Identify<br/>Review · Activity"]
+    CLI["Command-line tools<br/>enroll · match · send_alerts<br/>manage_operators"]
+  end
+  subgraph API["FastAPI backend"]
+    direction TB
+    AUTH["Authentication<br/>scrypt passwords · signed tokens"]
+    ROUTES["REST routes<br/>watchlist · decisions · audit"]
+    INGEST["Ingest<br/>enrol and scan uploads"]
+    JOBS["Job runner<br/>background jobs with progress"]
+    INGEST --> JOBS
+  end
+  subgraph CORE["Recognition core"]
+    direction TB
+    PIPE["Detection and tracking<br/>YOLOv8n · DeepSORT"] --> BUF["Track buffers<br/>main ring · gait ring"]
+    BUF --> FACE["Face<br/>ArcFace + occlusion check"]
+    BUF --> GAIT["Gait<br/>silhouettes to GEI"]
+    BUF --> REID["Appearance<br/>OSNet MSMT17"]
+    FACE --> MATCH["Gallery matching<br/>cosine similarity"]
+    GAIT --> MATCH
+    REID --> MATCH
+    MATCH --> FUSE["Calibration and fusion<br/>quality-weighted · 0.55"]
+  end
+  subgraph DATA["Storage"]
+    direction TB
+    REPO["WatchlistRepository<br/>encryption · audit logging"] --> DB[("SQLite database")]
+    W[("Model weights")]
+  end
+  subgraph ALERTS["Alerting"]
+    direction TB
+    DISP["Alert dispatcher<br/>confirmed decisions only"] --> CH["Console · SMTP · Twilio"]
+  end
+  CLIENTS -->|HTTP JSON| API
+  API -->|jobs| CORE
+  CORE -->|pending decisions| DATA
+  API -->|reads and writes| DATA
+  DATA -->|confirmed decisions| ALERTS

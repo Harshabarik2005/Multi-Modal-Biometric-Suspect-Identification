@@ -1,0 +1,68 @@
+classDiagram
+  direction LR
+  class Person {
+    +int id
+    +str person_id
+    +str display_name
+    +str notes
+    +bytes reference_jpeg
+    +datetime enrolled_at
+    +datetime retired_at
+  }
+  class Template {
+    +int id
+    +str modality
+    +bytes payload
+    +bool encrypted
+    +int dim
+    +float quality
+    +int frames_used
+    +str model_id
+  }
+  class MatchDecision {
+    +int id
+    +str camera_id
+    +int track_id
+    +int frame_index
+    +float score
+    +str strategy
+    +str weights_json
+    +str calibrated_json
+    +str unused_json
+    +bytes evidence_jpeg
+    +DecisionStatus status
+  }
+  class DecisionReview {
+    +int id
+    +str operator
+    +DecisionStatus verdict
+    +str reason
+    +bool overturns_previous
+  }
+  class DecisionStatus {
+    <<enumeration>>
+    PENDING
+    CONFIRMED
+    REJECTED
+    EXPIRED
+  }
+  class Operator {
+    +str username
+    +str display_name
+    +str password_hash
+    +bool is_active
+    +bool is_admin
+  }
+  class AuditEvent {
+    +str kind
+    +str actor
+    +str subject
+    +str detail_json
+    +datetime created_at
+  }
+
+  Person "1" *-- "0..3" Template : has
+  Person "1" o-- "*" MatchDecision : identified in
+  MatchDecision "1" *-- "*" DecisionReview : reviewed by
+  MatchDecision --> DecisionStatus
+  Operator "1" ..> "*" DecisionReview : authors

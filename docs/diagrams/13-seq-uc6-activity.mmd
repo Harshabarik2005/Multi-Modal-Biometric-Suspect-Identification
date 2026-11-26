@@ -1,0 +1,20 @@
+sequenceDiagram
+  autonumber
+  actor Op as Operator
+  participant UI as React console (Activity)
+  participant API as FastAPI
+  participant Repo as WatchlistRepository
+  participant DB as Database
+  Op->>UI: Open Activity
+  par Confirmed identifications
+    UI->>API: GET /api/alerts
+    API->>Repo: actionable_decisions()
+    Repo->>DB: Query CONFIRMED decisions
+    API-->>UI: Confirmed decisions and their reviews
+  and Audit trail
+    UI->>API: GET /api/audit
+    API->>Repo: audit_trail()
+    Repo->>DB: Query audit events
+    API-->>UI: Append-only event list
+  end
+  UI-->>Op: Confirmed identifications and full history

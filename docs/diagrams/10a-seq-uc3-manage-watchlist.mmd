@@ -1,0 +1,29 @@
+sequenceDiagram
+  autonumber
+  actor Op as Operator
+  participant UI as React console (Records)
+  participant API as FastAPI watchlist routes
+  participant Repo as WatchlistRepository
+  participant DB as Database
+  Op->>UI: Open Records
+  UI->>API: GET /api/watchlist
+  API->>Repo: list_people()
+  Repo->>DB: Query people
+  API-->>UI: People, their signals and decision counts
+  alt Edit details
+    Op->>UI: Change name or notes
+    UI->>API: PATCH /api/watchlist/person-id
+    API->>Repo: Update person
+    Repo->>DB: Save
+  else Replace footage
+    Op->>UI: Upload newer footage
+    UI->>API: POST /api/enroll with replace set
+    Note over API,Repo: Same steps as UC2 Enrol person
+  else Retire or restore
+    Op->>UI: Confirm Retire or Restore
+    UI->>API: DELETE /api/watchlist/person-id or POST .../restore
+    API->>Repo: retire() or restore()
+    Repo->>DB: Update record and write audit event
+  end
+  API-->>UI: Updated record
+  UI-->>Op: Show result

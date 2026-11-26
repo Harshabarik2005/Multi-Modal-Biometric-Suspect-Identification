@@ -1,0 +1,25 @@
+sequenceDiagram
+  autonumber
+  actor Ad as Administrator
+  participant CLI as send_alerts.py
+  participant Disp as AlertDispatcher
+  participant Repo as WatchlistRepository
+  participant N as Notifier
+  actor Rec as Alert recipient
+  Ad->>CLI: Run send_alerts.py, with --send to deliver
+  CLI->>Disp: dispatch()
+  Disp->>Repo: actionable_decisions() CONFIRMED only
+  Disp->>Repo: Alerts already sent
+  loop Each confirmed decision not yet alerted
+    Disp->>Disp: Check again that it is CONFIRMED
+    Disp->>Disp: render() with operator and signals
+    alt Sending enabled
+      Disp->>N: send(alert) by console, SMTP or Twilio
+      N->>Rec: E-mail or SMS
+      Disp->>Repo: Write alert_sent audit event
+    else Dry run
+      Disp-->>CLI: Show what would be sent
+    end
+  end
+  Disp-->>CLI: Dispatch report
+  CLI-->>Ad: Summary

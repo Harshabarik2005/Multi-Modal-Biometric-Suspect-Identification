@@ -1,0 +1,24 @@
+sequenceDiagram
+  autonumber
+  actor Op as Operator
+  participant UI as React console
+  participant API as FastAPI auth routes
+  participant Auth as Auth module
+  participant DB as Database
+  Op->>UI: Enter username and password
+  UI->>API: POST /api/auth/login
+  API->>DB: Find operator by username
+  DB-->>API: Operator record
+  API->>Auth: verify_password(password, salt, hash)
+  alt Valid and account active
+    Auth-->>API: Match
+    API->>Auth: issue_token(username)
+    Auth-->>API: HMAC-signed token with expiry
+    API-->>UI: 200 with token
+    UI->>API: GET /api/auth/me with Bearer token
+    API-->>UI: Operator profile
+    UI-->>Op: Open the console
+  else Wrong credentials or disabled
+    API-->>UI: 401 Unauthorized
+    UI-->>Op: Show error
+  end

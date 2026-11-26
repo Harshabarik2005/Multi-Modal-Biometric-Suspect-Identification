@@ -1,0 +1,26 @@
+sequenceDiagram
+  autonumber
+  actor Op as Operator
+  participant UI as React console (Records)
+  participant API as FastAPI watchlist routes
+  participant Repo as WatchlistRepository
+  participant DB as Database
+  alt Erase biometrics
+    Op->>UI: Choose Erase biometrics and type the person id
+    UI->>API: DELETE /api/watchlist/person-id/biometrics
+    API->>Repo: erase_biometrics()
+    Repo->>DB: Delete templates and photo, keep decisions
+    Repo->>DB: Write audit event
+    API-->>UI: 200 Erased
+  else Delete permanently
+    Op->>UI: Choose Delete permanently and type the person id
+    UI->>API: DELETE /api/watchlist/person-id/permanently
+    API->>Repo: delete_permanently()
+    alt No decision references the person
+      Repo->>DB: Delete the record and write audit event
+      API-->>UI: 200 Deleted
+    else Decisions exist
+      API-->>UI: 409 Conflict, erase biometrics instead
+    end
+  end
+  UI-->>Op: Show result

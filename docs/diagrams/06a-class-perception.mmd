@@ -1,0 +1,68 @@
+classDiagram
+  direction TB
+  class DetectionTrackingPipeline {
+    +stream(source)
+    +run(source) PipelineReport
+  }
+  class YOLOPersonDetector {
+    +detect(frame) List~Detection~
+  }
+  class DeepSortTracker {
+    +update(detections, frame) List~Track~
+  }
+  class TrackBufferStore {
+    +update(result, frame)
+    +get(track_id) TrackBuffer
+  }
+  class TrackBuffer {
+    +observations
+    +gait_observations
+    +best(n) List~TrackObservation~
+    +gait_stride() int
+  }
+  class TrackObservation {
+    +frame_index
+    +timestamp_s
+    +crop
+    +box_height
+    +at_frame_edge
+  }
+  class EmbeddingBranch {
+    <<abstract>>
+    +model_id
+    +embed(observations) ModalityEmbedding
+    +embed_reference(observations) ModalityEmbedding
+  }
+  class PerFrameBranch {
+    <<abstract>>
+    +embed_frame(observation) ModalityEmbedding
+  }
+  class FaceEmbedder
+  class ReIDEmbedder
+  class GaitEmbedder
+  class SilhouetteExtractor {
+    +extract(observations) List~Silhouette~
+  }
+  class OcclusionDetector {
+    +detect() OcclusionMap
+  }
+  class ModalityEmbedding {
+    +modality
+    +vector
+    +quality
+    +reason
+  }
+
+  DetectionTrackingPipeline --> YOLOPersonDetector
+  DetectionTrackingPipeline --> DeepSortTracker
+  DetectionTrackingPipeline ..> TrackBufferStore : feeds tracks
+  TrackBufferStore "1" o-- "*" TrackBuffer
+  TrackBuffer "1" o-- "*" TrackObservation
+  EmbeddingBranch ..> TrackObservation : reads
+  EmbeddingBranch ..> ModalityEmbedding : produces
+  EmbeddingBranch <|-- PerFrameBranch
+  EmbeddingBranch <|-- GaitEmbedder
+  PerFrameBranch <|-- FaceEmbedder
+  PerFrameBranch <|-- ReIDEmbedder
+  FaceEmbedder --> OcclusionDetector
+  GaitEmbedder --> SilhouetteExtractor

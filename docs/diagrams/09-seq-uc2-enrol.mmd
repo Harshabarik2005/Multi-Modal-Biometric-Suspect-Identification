@@ -1,0 +1,33 @@
+sequenceDiagram
+  autonumber
+  actor Op as Operator
+  participant UI as React console (Register)
+  participant API as FastAPI enrol routes
+  participant Jobs as JobRunner
+  participant Media as Media processing
+  participant Br as Face, gait and appearance branches
+  participant Repo as WatchlistRepository
+  participant DB as Database
+  Op->>UI: Choose photos or video, name and notes
+  opt Check coverage
+    UI->>API: POST /api/enroll/preview
+    API->>Media: Detect and track people in the files
+    Media-->>API: Signals the files can support
+    API-->>UI: Coverage report
+  end
+  Op->>UI: Press Register
+  UI->>API: POST /api/enroll
+  API->>Jobs: Submit enrol job
+  API-->>UI: Job id
+  Jobs->>Media: observations_from_uploads(files)
+  Media-->>Jobs: Tracked observations
+  Jobs->>Br: embed_reference for each signal
+  Br-->>Jobs: Templates, or the reason a signal was refused
+  Jobs->>Repo: enroll(person, templates)
+  Repo->>Repo: Encrypt templates
+  Repo->>DB: Save person, templates and audit event
+  loop Until the job finishes
+    UI->>API: GET /api/jobs/job-id
+    API-->>UI: Progress or result
+  end
+  UI-->>Op: Stored signals, and skipped signals with reasons

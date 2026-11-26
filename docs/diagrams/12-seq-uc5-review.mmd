@@ -1,0 +1,26 @@
+sequenceDiagram
+  autonumber
+  actor Op as Operator
+  participant UI as React console (Review)
+  participant API as FastAPI decision routes
+  participant Repo as WatchlistRepository
+  participant DB as Database
+  Op->>UI: Open Review
+  UI->>API: GET /api/decisions
+  API->>Repo: pending_decisions()
+  Repo->>DB: Query PENDING decisions
+  API-->>UI: Cards with weights and not-counted reasons
+  UI->>API: GET evidence crop and enrolment photo
+  API-->>UI: Decrypted images
+  Op->>UI: Compare the two images, add an optional note
+  alt Confirm identification
+    UI->>API: POST /api/decisions/id/review with confirmed
+  else Not this person
+    UI->>API: POST /api/decisions/id/review with rejected
+  end
+  API->>API: Take the operator from the signed-in session
+  API->>Repo: review(decision, operator, verdict, note)
+  Repo->>DB: Add DecisionReview row and update status
+  Repo->>DB: Write audit event
+  API-->>UI: Updated decision
+  UI-->>Op: Card leaves the queue

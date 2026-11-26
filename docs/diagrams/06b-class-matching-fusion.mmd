@@ -1,0 +1,58 @@
+classDiagram
+  direction TB
+  class Gallery {
+    +rank(probes, strategy) List~MatchCandidate~
+    +gait_population_mean(n)
+  }
+  class PersonRecord {
+    +person_id
+    +display_name
+    +embeddings
+  }
+  class ModalityEmbedding {
+    +modality
+    +vector
+    +quality
+  }
+  class MatchCandidate {
+    +fused_similarity
+    +weights
+    +not_counted()
+  }
+  class ModalityScore {
+    +similarity
+    +probe_quality
+    +incomparable_reason
+    +model_mismatch
+  }
+  class FusionStrategy {
+    <<abstract>>
+    +fuse(inputs) FusionResult
+  }
+  class SingleBestFusion
+  class AverageFusion
+  class QualityWeightedFusion
+  class ModalityCalibration {
+    +impostor_anchor
+    +genuine_anchor
+    +withheld_reason
+    +calibrate(similarity) float
+  }
+  class FusionResult {
+    +score
+    +weights
+    +calibrated
+    +withheld
+  }
+
+  Gallery "1" o-- "*" PersonRecord
+  PersonRecord "1" o-- "0..3" ModalityEmbedding : templates
+  Gallery ..> MatchCandidate : creates
+  Gallery ..> FusionStrategy : uses
+  MatchCandidate "1" *-- "*" ModalityScore
+  MatchCandidate --> FusionResult
+  FusionStrategy <|-- SingleBestFusion
+  FusionStrategy <|-- AverageFusion
+  FusionStrategy <|-- QualityWeightedFusion
+  FusionStrategy "1" o-- "3" ModalityCalibration
+  FusionStrategy ..> FusionResult : returns

@@ -1,0 +1,36 @@
+sequenceDiagram
+  autonumber
+  actor Op as Operator
+  participant UI as React console (Identify)
+  participant API as FastAPI scan route
+  participant Jobs as JobRunner
+  participant Pipe as Detector and tracker
+  participant Buf as Track buffers
+  participant Br as Face, gait and appearance branches
+  participant Gal as Gallery
+  participant Fus as Fusion
+  participant Repo as WatchlistRepository
+  Op->>UI: Upload CCTV video
+  UI->>API: POST /api/scan
+  API->>Jobs: Submit scan job
+  API-->>UI: Job id
+  Jobs->>Repo: load_gallery()
+  Repo-->>Jobs: Active people and templates
+  loop Every frame
+    Jobs->>Pipe: Detect people and update tracks
+    Pipe-->>Jobs: Tracks with boxes
+    Jobs->>Buf: Add each track's crop
+    opt Track has 5 or more observations and 15 frames passed
+      Jobs->>Br: Embed best crops and the gait ring
+      Br-->>Jobs: Probes, or the reason each signal refused
+      Jobs->>Gal: rank(probes, strategy)
+      Gal->>Fus: Calibrate and fuse for each person
+      Fus-->>Gal: Fused score, weights, withheld signals
+      Gal-->>Jobs: Best candidate
+      Jobs->>Jobs: Keep if score is at least 0.55 and best so far
+    end
+  end
+  Jobs->>Repo: record_match() once per matched track as PENDING
+  UI->>API: GET /api/jobs/job-id until done
+  API-->>UI: Findings with scores and what did not count
+  UI-->>Op: Results, queued for review

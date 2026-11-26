@@ -1,0 +1,21 @@
+sequenceDiagram
+  autonumber
+  actor Ad as Administrator
+  participant CLI as manage_operators.py
+  participant Auth as Auth module
+  participant DB as Database
+  alt Create account
+    Ad->>CLI: --create username with optional --admin
+    CLI->>Ad: Ask for password twice, hidden
+    Ad->>CLI: Password
+    CLI->>Auth: create_operator(username, password, admin)
+    Auth->>Auth: hash_password with a random salt
+    Auth->>DB: Insert operator
+  else List accounts
+    Ad->>CLI: --list
+    CLI->>DB: Query operators
+  else Disable, enable or reset password
+    Ad->>CLI: --disable, --enable or --reset-password username
+    CLI->>DB: Update operator
+  end
+  CLI-->>Ad: Result
